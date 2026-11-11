@@ -1,0 +1,17 @@
+# macOS metadata
+.DS_Store
+
+# Local build output and temporary runs
+/app/.build/
+/app/Peek.app/
+/app/HotkeyWindow.app/
+/app/runs/
+/runs/
+/app/Resources/AppIcon.iconset/
+/app/Resources/AppIcon-1024-grid.png
+
+# Local research material and independent upstream checkouts
+/analysis/
+/Thor/
+/Dockit/
+/iTerm2/
