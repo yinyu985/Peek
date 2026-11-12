@@ -26,13 +26,18 @@ struct Shortcut: Codable, Equatable {
 }
 enum WindowEdge: String, Codable, CaseIterable {
     case top, bottom, left, right
-    var title: String { switch self { case .top: return "↑ 顶部"; case .bottom: return "↓ 底部"; case .left: return "← 左侧"; case .right: return "→ 右侧" } }
-    func hidden(_ frame: CGRect, screen: CGRect) -> CGPoint {
+    static func available(topEnabled: Bool) -> [WindowEdge] { allCases.filter { topEnabled || $0 != .top } }
+    var title: String { switch self { case .top: return L("↑ 顶部"); case .bottom: return L("↓ 底部"); case .left: return L("← 左侧"); case .right: return L("→ 右侧") } }
+    func hidden(_ frame: CGRect, screen: CGRect, revealWidth: Double = 0) -> CGPoint {
+        // Fully off-screen positions can make AppKit pull the window back by
+        // a titlebar-sized strip. Keep the original 1pt foothold when set to 0.
+        let extent = self == .bottom ? frame.height:frame.width
+        let strip = min(max(1,CGFloat(HoverSettings.boundedRevealWidth(revealWidth))),max(0,extent-1))
         switch self {
         case .top: return CGPoint(x:frame.minX,y:screen.minY-frame.height+1)
-        case .bottom: return CGPoint(x:frame.minX,y:screen.maxY-1)
-        case .left: return CGPoint(x:screen.minX-frame.width+1,y:frame.minY)
-        case .right: return CGPoint(x:screen.maxX-1,y:frame.minY)
+        case .bottom: return CGPoint(x:frame.minX,y:screen.maxY-strip)
+        case .left: return CGPoint(x:screen.minX-frame.width+strip,y:frame.minY)
+        case .right: return CGPoint(x:screen.maxX-strip,y:frame.minY)
         }
     }
     func shown(_ frame: CGRect, visible: CGRect) -> CGPoint {
@@ -59,10 +64,10 @@ struct AppBinding: Codable, Identifiable {
     init(url: URL) throws {
         guard url.pathExtension.lowercased() == "app",let bundle = Bundle(url:url),
               let identifier = bundle.bundleIdentifier, bundle.executableURL != nil else {
-            throw PeekError.message("请选择有效的 .app 应用。")
+            throw PeekError.message(L("请选择有效的 .app 应用。"))
         }
         guard identifier != Bundle.main.bundleIdentifier && identifier != "dev.local.Peek" else {
-            throw PeekError.message("请选择需要控制的其他应用。")
+            throw PeekError.message(L("请选择需要控制的其他应用。"))
         }
         id = UUID(); bundleID = identifier; path = url.path
         name = (bundle.object(forInfoDictionaryKey:"CFBundleDisplayName") as? String)
@@ -83,19 +88,38 @@ private enum LegacyAnimationSpeed: Int, Codable {
     case slow, medium, fast
     var duration: Double { switch self { case .slow: return 0.45; case .medium: return 0.22; case .fast: return 0.10 } }
 }
+enum TopHideMode: String, Codable, CaseIterable {
+    case shade, minimize
+    var title: String { self == .shade ? L("标题条"):L("最小化") }
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        switch value {
+        case "shade", "compression": self = .shade
+        case "minimize": self = .minimize
+        default: throw DecodingError.dataCorrupted(.init(codingPath:decoder.codingPath,debugDescription:"Unknown top hide mode"))
+        }
+    }
+}
 struct HoverSettings: Codable, Equatable {
     var enabled = true
     var showDelay = 0.0
     var hideDelay = 0.0
     var showDuration = 0.22
     var hideDuration = 0.22
+    var revealWidth = 8.0
+    var topEnabled = false
+    var topHideMode: TopHideMode = .minimize
+    var allowSpaceSwitch = true
+    static func boundedRevealWidth(_ value: Double) -> Double { value.isFinite ? max(0,min(100,value.rounded())):8 }
     static func boundedDuration(_ value: Double) -> Double { value.isFinite ? max(0,min(1,value)):0.22 }
     init(enabled: Bool = true, showDelay: Double = 0, hideDelay: Double = 0,
-         showDuration: Double = 0.22, hideDuration: Double = 0.22) {
+         showDuration: Double = 0.22, hideDuration: Double = 0.22, revealWidth: Double = 8, topEnabled: Bool = false, topHideMode: TopHideMode = .minimize, allowSpaceSwitch: Bool = true) {
         self.enabled = enabled; self.showDelay = showDelay; self.hideDelay = hideDelay
         self.showDuration = Self.boundedDuration(showDuration); self.hideDuration = Self.boundedDuration(hideDuration)
+        self.revealWidth = Self.boundedRevealWidth(revealWidth)
+        self.topEnabled = topEnabled; self.topHideMode = topHideMode; self.allowSpaceSwitch = allowSpaceSwitch
     }
-    private enum CodingKeys: String, CodingKey { case enabled, showDelay, hideDelay, showDuration, hideDuration, showSpeed, hideSpeed }
+    private enum CodingKeys: String, CodingKey { case enabled, showDelay, hideDelay, showDuration, hideDuration, showSpeed, hideSpeed, revealWidth, topEnabled, topHideMode, allowSpaceSwitch, topCompressionEnabled, topMinimizeEnabled }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy:CodingKeys.self)
         enabled = try values.decode(Bool.self,forKey:.enabled)
@@ -107,12 +131,24 @@ struct HoverSettings: Codable, Equatable {
         }
         showDuration = try duration(.showDuration,.showSpeed)
         hideDuration = try duration(.hideDuration,.hideSpeed)
+        revealWidth = Self.boundedRevealWidth(try values.decodeIfPresent(Double.self,forKey:.revealWidth) ?? 8)
+        let legacyMinimize = try values.decodeIfPresent(Bool.self,forKey:.topMinimizeEnabled) ?? false
+        topEnabled = try values.decodeIfPresent(Bool.self,forKey:.topEnabled)
+            ?? values.decodeIfPresent(Bool.self,forKey:.topCompressionEnabled) ?? legacyMinimize
+        // Keep the old decoder/backend for recovery. New hides only minimize.
+        _ = try values.decodeIfPresent(TopHideMode.self,forKey:.topHideMode)
+        topHideMode = .minimize
+        allowSpaceSwitch = try values.decodeIfPresent(Bool.self,forKey:.allowSpaceSwitch) ?? true
     }
     func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy:CodingKeys.self)
         try values.encode(enabled,forKey:.enabled)
         try values.encode(showDelay,forKey:.showDelay); try values.encode(hideDelay,forKey:.hideDelay)
         try values.encode(showDuration,forKey:.showDuration); try values.encode(hideDuration,forKey:.hideDuration)
+        try values.encode(revealWidth,forKey:.revealWidth)
+        try values.encode(topEnabled,forKey:.topEnabled)
+        try values.encode(topHideMode,forKey:.topHideMode)
+        try values.encode(allowSpaceSwitch,forKey:.allowSpaceSwitch)
     }
 }
 final class BindingStore {
@@ -129,11 +165,11 @@ final class BindingStore {
         menuBarIconVisible = defaults.object(forKey:menuBarKey) as? Bool ?? true
         if let data = defaults.data(forKey:hoverKey) {
             do { hoverSettings = try JSONDecoder().decode(HoverSettings.self,from:data) }
-            catch { loadError = "收放配置无法读取，原始数据已保留。" }
+            catch { loadError = L("收放配置无法读取，原始数据已保留。") }
         }
         if let data = defaults.data(forKey:key) {
             do { bindings = try JSONDecoder().decode([AppBinding].self,from:data) }
-            catch { loadError = "应用配置无法读取，原始数据已保留。" }
+            catch { loadError = L("应用配置无法读取，原始数据已保留。") }
         }
     }
     private func save(_ next: [AppBinding]) throws {
@@ -142,13 +178,14 @@ final class BindingStore {
         defaults.set(data,forKey:key); bindings = next
     }
     @discardableResult func add(_ url: URL) throws -> UUID {
-        let item = try AppBinding(url:url)
+        var item = try AppBinding(url:url)
+        item.edge = .right
         if let existing = bindings.first(where:{$0.bundleID == item.bundleID}) { return existing.id }
         try save(bindings + [item]); return item.id
     }
     func setShortcut(_ shortcut: Shortcut?, for id: UUID) throws {
         if let shortcut,bindings.contains(where:{$0.id != id && $0.shortcut?.matches(shortcut) == true}) {
-            throw PeekError.message("这个快捷键已绑定到另一个应用。")
+            throw PeekError.message(L("这个快捷键已绑定到另一个应用。"))
         }
         var next = bindings
         guard let index = next.firstIndex(where:{$0.id == id}) else { return }
@@ -162,12 +199,16 @@ final class BindingStore {
         try save(next)
     }
     func configureHover(enabled: Bool? = nil, showDelay: Double? = nil, hideDelay: Double? = nil,
-                        showDuration: Double? = nil, hideDuration: Double? = nil) throws {
+                        showDuration: Double? = nil, hideDuration: Double? = nil, revealWidth: Double? = nil, topEnabled: Bool? = nil, topHideMode: TopHideMode? = nil, allowSpaceSwitch: Bool? = nil) throws {
         guard loadError == nil else { throw PeekError.message(loadError!) }
         var next = hoverSettings
         if let enabled { next.enabled = enabled }
+        if let topEnabled { next.topEnabled = topEnabled }
+        if let topHideMode { next.topHideMode = topHideMode }
+        if let allowSpaceSwitch { next.allowSpaceSwitch = allowSpaceSwitch }
         if let showDuration { next.showDuration = HoverSettings.boundedDuration(showDuration) }
         if let hideDuration { next.hideDuration = HoverSettings.boundedDuration(hideDuration) }
+        if let revealWidth { next.revealWidth = HoverSettings.boundedRevealWidth(revealWidth) }
         if let value = showDelay,value.isFinite { next.showDelay = max(0,min(5,value)) }
         if let value = hideDelay,value.isFinite { next.hideDelay = max(0,min(10,value)) }
         let data = try JSONEncoder().encode(next)

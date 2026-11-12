@@ -55,11 +55,11 @@ final class GlobalShortcutManager {
         }
     }
     private func register(_ shortcut: Shortcut, for id: UUID) -> String? {
-        guard handlerStatus == noErr else { return "快捷键监听失败（\(handlerStatus)）。" }
+        guard handlerStatus == noErr else { return L("快捷键监听失败（{0}）。",handlerStatus) }
         counter &+= 1
         var ref: EventHotKeyRef?
         let code = RegisterEventHotKey(shortcut.keyCode,shortcut.modifiers,EventHotKeyID(signature:Self.signature,id:counter),GetEventDispatcherTarget(),0,&ref)
-        guard code == noErr,let ref else { return "快捷键被系统或其他应用占用（\(code)）。" }
+        guard code == noErr,let ref else { return L("快捷键被系统或其他应用占用（{0}）。",code) }
         refs[id] = ref; ids[counter] = id; shortcuts[counter] = shortcut; return nil
     }
     // Called while all Peek shortcuts are suspended by the recorder.
