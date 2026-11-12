@@ -36,8 +36,8 @@ git push -u origin main
 检查本地 DMG 后，推送与 `version` 一致的标签：
 
 ```sh
-git tag -a v1.4.12 -m "Peek 1.4.12"
-git push origin v1.4.12
+git tag -a v1.4.13 -m "Peek 1.4.13"
+git push origin v1.4.13
 ```
 
 `.github/workflows/release.yml` 随标签推送触发，在 macOS runner 上分别构建 ARM64 和 Intel DMG。版本不匹配会终止构建。通过仓库自带的 `GITHUB_TOKEN` 发布，不需要个人 token 或 Apple 开发者证书；这不等于 Apple 签名认证或公证。
@@ -95,4 +95,4 @@ git push origin v1.4.12
 
 召回方式保存于设置的 `ApplicationRecallMethods.v1` 字典。用独立 UserDefaults 验证首次兼容回退、下次直接调用、重建控制器后保留、首选失效后学习替代方式；失败及退出恢复不学习。通过 `application_recall_method` 和 `application_recalled` 的毫秒计时区分请求等待与系统过渡。
 
-逐应用顶部方式：检查旧绑定缺少字段时沿用通用默认、两个应用可分别最小化／整应用隐藏、切回“↑ 顶部”恢复默认、换方向保留选择、隐藏期间修改方式先按原记录恢复。中英文的方式说明图标在最右侧，方向面板与按钮同宽，条目仍为 44pt。
+顶部方式统一由通用设置：应用方向菜单只有顶部、底部、左侧、右侧，关闭顶部后只剩三项。检查隐藏期间修改方式先按原记录恢复。中英文方式说明图标在最右侧，方向面板与按钮同为 86pt 宽，条目仍为 44pt。

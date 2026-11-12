@@ -136,8 +136,6 @@
 "原应用进程已结束或已重启，已停止操作旧窗口。" = "The original application process ended or restarted. Operations on its old window were stopped.";
 "应用身份暂时无法确认，已保留恢复记录，请稍后重试。" = "The application identity is temporarily unavailable. Its recovery record was kept. Try again shortly.";
 "应用状态暂时无法读取，已保留恢复记录，请稍后重试。" = "The application state is temporarily unavailable. Its recovery record was kept. Try again shortly.";
-"↑ 隐藏应用" = "↑ Hide app";
-"↑ 最小化" = "↑ Minimize";
 "顶部收起方式说明" = "About top hide methods";
 "多窗口应用建议使用最小化；隐藏应用会同时隐藏它的所有窗口。" = "Use Minimize for applications with multiple windows. Hide application hides all their windows.";
-"隐藏整个应用会同时隐藏该应用的所有窗口。\n\n如果应用有多个窗口，例如浏览器或 Finder，建议使用“最小化窗口”，只收起绑定窗口。\n\n这里设置通用默认方式。在“应用”的方向菜单中，可为每个应用选择“↑ 最小化”或“↑ 隐藏应用”；选择“↑ 顶部”则使用通用默认。" = "Hide application hides all windows of that application together.\n\nFor applications with multiple windows, such as a browser or Finder, use Minimize window to hide only the bound window.\n\nThis sets the general default. In Apps, choose ↑ Minimize or ↑ Hide app from each application’s direction menu. Choose ↑ Top to use the general default.";
+"隐藏整个应用会同时隐藏该应用的所有窗口。\n\n如果应用有多个窗口，例如浏览器或 Finder，建议使用“最小化窗口”，只收起绑定窗口。\n\n此设置统一用于所有选择顶部收放的应用。" = "Hide application hides all windows of that app.\n\nFor apps with multiple windows, such as browsers or Finder, use Minimize window to hide only the bound window.\n\nThis setting applies to all apps that use top-edge hiding.";

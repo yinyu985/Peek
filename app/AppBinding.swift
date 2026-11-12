@@ -60,12 +60,7 @@ struct AppBinding: Codable, Identifiable {
     var shortcut: Shortcut?
     var edge: WindowEdge?
     var windowTitle: String?
-    var topHideMode: TopHideMode?
     var selectedEdge: WindowEdge { edge ?? .top }
-    func effectiveTopHideMode(defaults: HoverSettings) -> TopHideMode { topHideMode ?? defaults.topHideMode }
-    var directionTitle: String {
-        selectedEdge == .top ? (topHideMode?.directionTitle ?? WindowEdge.top.title):selectedEdge.title
-    }
     init(url: URL) throws {
         guard url.pathExtension.lowercased() == "app",let bundle = Bundle(url:url),
               let identifier = bundle.bundleIdentifier, bundle.executableURL != nil else {
@@ -96,7 +91,6 @@ private enum LegacyAnimationSpeed: Int, Codable {
 enum TopHideMode: String, Codable, CaseIterable {
     case minimize, appHide
     var title: String { self == .appHide ? L("隐藏整个应用"):L("最小化窗口") }
-    var directionTitle: String { self == .appHide ? L("↑ 隐藏应用"):L("↑ 最小化") }
     init(from decoder: Decoder) throws {
         let value = try decoder.singleValueContainer().decode(String.self)
         switch value {
@@ -197,12 +191,11 @@ final class BindingStore {
         guard let index = next.firstIndex(where:{$0.id == id}) else { return }
         next[index].shortcut = shortcut; try save(next)
     }
-    func configure(_ id: UUID, edge: WindowEdge? = nil, windowTitle: String? = nil, changeWindow: Bool = false, topHideMode: TopHideMode? = nil, changeTopHideMode: Bool = false) throws {
+    func configure(_ id: UUID, edge: WindowEdge? = nil, windowTitle: String? = nil, changeWindow: Bool = false) throws {
         var next = bindings
         guard let index = next.firstIndex(where:{$0.id == id}) else { return }
         if let edge { next[index].edge = edge }
         if changeWindow { next[index].windowTitle = windowTitle }
-        if changeTopHideMode { next[index].topHideMode = topHideMode }
         try save(next)
     }
     func configureHover(enabled: Bool? = nil, showDelay: Double? = nil, hideDelay: Double? = nil,

@@ -634,7 +634,7 @@ final class WindowController {
                 let target = try self.select(binding,allowOtherSpaces:animation.allowSpaceSwitch)
                 var currentEpoch = self.spaceEpoch(); mutationEpoch = currentEpoch
                 if target.recovery.hideStrategy == .appHide ||
-                   (target.recovery.hideStrategy == nil && binding.selectedEdge == .top && binding.effectiveTopHideMode(defaults:animation) == .appHide) {
+                   (target.recovery.hideStrategy == nil && binding.selectedEdge == .top && animation.topHideMode == .appHide) {
                     mutated = true
                     snapshot = try self.setApplicationVisibility(target,binding:binding,show:show,frontPID:frontPID,
                         settings:animation,screens:screens.map { $0.0 },epoch:currentEpoch,source:source)
