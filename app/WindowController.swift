@@ -113,6 +113,7 @@ final class WindowController {
     var animationSettings = HoverSettings() // Read on main, captured per request.
     var interactionProvider: ()->Bool = { PointerInteraction.isBusy }
     var foregroundProvider: ()->pid_t? = { NSWorkspace.shared.frontmostApplication?.processIdentifier }
+    var pointerProvider: ()->CGPoint? = { CGEvent(source:nil)?.location }
     private func respectUserInteraction() throws {
         if interactionProvider() { throw WindowInterruption.userInteraction }
     }
@@ -357,6 +358,7 @@ final class WindowController {
     private func setApplicationVisibility(_ target: ManagedWindow,binding: AppBinding,show: Bool?,frontPID: pid_t?,
                                           settings: HoverSettings,screens: [CGRect],epoch: Int,source: String) throws -> HoverWindow {
         let began = ProcessInfo.processInfo.systemUptime
+        var automaticHideDeferred = false
         target.recalledWith = nil
         let app = try application(target.recovery)
         let owned = target.recovery.hideStrategy == .appHide && target.recovery.applicationHidden == true
@@ -384,6 +386,7 @@ final class WindowController {
                 throw PeekError.message(L("目标窗口状态无法确认，未执行收放。"))
             }
             let old = target.recovery
+            let previousRecord = records[binding.id]
             target.recovery = WindowRecovery(bindingID:old.bindingID,pid:old.pid,launch:old.launch,bundle:old.bundle,
                 title:old.title,original:frame,processStart:old.processStart ?? ProcessStart.read(old.pid),applicationHidden:true,
                 hiddenSpaceIDs:WindowSpaces.assignedSpaceIDs(target.number).map { Array($0) },
@@ -391,16 +394,35 @@ final class WindowController {
             records[binding.id] = target.recovery; try persist()
             try respectUserInteraction()
             guard spaceEpoch() == epoch,!app.isHidden else { throw PeekError.message(L("应用或桌面状态改变，已停止收起。")) }
-            let accepted = DispatchQueue.main.sync { app.hide() }
-            output("application_hide_requested",["accepted":accepted,"binding":binding.id.uuidString])
-            let deadline = ProcessInfo.processInfo.systemUptime+1.5
-            repeat {
-                guard alive(target.recovery) else { throw PeekError.message(L("应用身份暂时无法确认，已保留恢复记录，请稍后重试。")) }
-                if app.isHidden,!onScreenWindows().contains(where:{($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == target.recovery.pid && ($0[kCGWindowLayer as String] as? Int) == 0}) { break }
-                guard ProcessInfo.processInfo.systemUptime < deadline else { throw PeekError.message(L("应用隐藏尚未确认，已尝试恢复。")) }
-                Thread.sleep(forTimeInterval:0.025)
-            } while true
-            target.hidden = true; target.hasShown = false
+            // Recheck at the actual mutation, not only at the Hover sample:
+            // the pointer or a newly opened viewer may have changed meanwhile.
+            let accepted: Bool? = DispatchQueue.main.sync {
+                if source == "hover" {
+                    guard let pointer = self.pointerProvider() else { return nil }
+                    if screens.contains(where: { screen in
+                        let window = HoverWindow(id:binding.id,edge:.top,screen:screen,frame:frame,hidden:false)
+                        return screen.intersects(frame) && (window.containsOpenArea(pointer) || window.containsTrigger(pointer))
+                    }) { return nil }
+                    guard ApplicationHoverArea.contains(pointer,pid:target.recovery.pid,
+                        windows:ApplicationHoverArea.visibleWindows()) == false else { return nil }
+                }
+                return app.hide()
+            }
+            if let accepted {
+                output("application_hide_requested",["accepted":accepted,"binding":binding.id.uuidString])
+                let deadline = ProcessInfo.processInfo.systemUptime+1.5
+                repeat {
+                    guard alive(target.recovery) else { throw PeekError.message(L("应用身份暂时无法确认，已保留恢复记录，请稍后重试。")) }
+                    if app.isHidden,!onScreenWindows().contains(where:{($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == target.recovery.pid && ($0[kCGWindowLayer as String] as? Int) == 0}) { break }
+                    guard ProcessInfo.processInfo.systemUptime < deadline else { throw PeekError.message(L("应用隐藏尚未确认，已尝试恢复。")) }
+                    Thread.sleep(forTimeInterval:0.025)
+                } while true
+                target.hidden = true; target.hasShown = false
+            } else {
+                target.recovery = old; records[binding.id] = previousRecord; try persist()
+                target.hidden = false; target.hasShown = true; automaticHideDeferred = true
+                output("application_hide_deferred",["binding":binding.id.uuidString,"reason":"pointer_in_application_or_unknown"])
+            }
         } else {
             if owned { try unhideOwnedApplication(target,activate:true) }
             guard axWindowNumber(target.element) == target.number,
@@ -430,9 +452,9 @@ final class WindowController {
             let aa = a.intersection(frame),bb = b.intersection(frame)
             return (aa.isNull ? 0:aa.width*aa.height) < (bb.isNull ? 0:bb.width*bb.height)
         }),screen.intersects(frame) else { throw PeekError.message(L("原显示器已断开，请恢复窗口后重新绑定。")) }
-        output("window_toggle",["success":true,"bundle":binding.bundleID,"hidden":hide,"backend":"appHide","animation_mode":"systemHide","source":source,"duration_ms":(ProcessInfo.processInfo.systemUptime-began)*1000])
-        return HoverWindow(id:binding.id,edge:.top,screen:screen,frame:frame,hidden:hide,manualHide:hide && source == "hotkey",
-            pid:target.recovery.pid,onCurrentSpace:applicationMembership(target.recovery) == .current)
+        output("window_toggle",["success":true,"bundle":binding.bundleID,"hidden":target.hidden,"backend":"appHide","animation_mode":"systemHide","source":source,"duration_ms":(ProcessInfo.processInfo.systemUptime-began)*1000])
+        return HoverWindow(id:binding.id,edge:.top,screen:screen,frame:frame,hidden:target.hidden,manualHide:target.hidden && source == "hotkey",
+            pid:target.recovery.pid,onCurrentSpace:applicationMembership(target.recovery) == .current,automaticHideDeferred:automaticHideDeferred)
     }
     private func waitRestoredFrame(_ target: ManagedWindow,_ frame: CGRect) -> Bool {
         let deadline = ProcessInfo.processInfo.systemUptime+1.2

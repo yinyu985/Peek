@@ -84,6 +84,8 @@ Enable **Top edge (experimental)** in General to make Top available in applicati
 
 **Use Minimize window for applications with multiple windows, such as browsers or Finder.** Set the top hide method in General for all apps. The information icon beside it explains the scope. In Apps, choose only the direction: top, bottom, left, or right.
 
+With Hide application, moving the pointer into another visible window, image viewer, or panel owned by the same application process keeps the app visible. Automatic hiding starts after leaving those windows and the top-edge corridor. Left, right, and bottom hiding still affect only the bound window.
+
 Hover over the screen's top edge segment corresponding to the original window width, or press its shortcut to restore it. Leaving the window and the path from the top edge hides it after the hide delay. Moving through the menu bar into the window keeps it open. No separate title bar is needed. Peek remembers each application’s successful recall method and uses it directly next time, including after a restart. WeChat uses the system reopen request directly. Show and hide delays apply to both modes; macOS controls the transitions, so Peek's show and hide durations do not apply. Changing modes restores an already hidden window using its previous mode, then uses the new mode on the next hide.
 
 Turning it off removes Top from direction menus. Existing top bindings show Disabled and can be changed to another direction. Windows already hidden by Peek can still be restored. Peek does not automatically restore windows you minimized or applications you hid yourself. Click the exclamation mark beside the switch for details.
