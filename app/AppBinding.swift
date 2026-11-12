@@ -60,7 +60,12 @@ struct AppBinding: Codable, Identifiable {
     var shortcut: Shortcut?
     var edge: WindowEdge?
     var windowTitle: String?
+    var topHideMode: TopHideMode?
     var selectedEdge: WindowEdge { edge ?? .top }
+    func effectiveTopHideMode(defaults: HoverSettings) -> TopHideMode { topHideMode ?? defaults.topHideMode }
+    var directionTitle: String {
+        selectedEdge == .top ? (topHideMode?.directionTitle ?? WindowEdge.top.title):selectedEdge.title
+    }
     init(url: URL) throws {
         guard url.pathExtension.lowercased() == "app",let bundle = Bundle(url:url),
               let identifier = bundle.bundleIdentifier, bundle.executableURL != nil else {
@@ -89,12 +94,14 @@ private enum LegacyAnimationSpeed: Int, Codable {
     var duration: Double { switch self { case .slow: return 0.45; case .medium: return 0.22; case .fast: return 0.10 } }
 }
 enum TopHideMode: String, Codable, CaseIterable {
-    case shade, minimize
-    var title: String { self == .shade ? L("标题条"):L("最小化") }
+    case minimize, appHide
+    var title: String { self == .appHide ? L("隐藏整个应用"):L("最小化窗口") }
+    var directionTitle: String { self == .appHide ? L("↑ 隐藏应用"):L("↑ 最小化") }
     init(from decoder: Decoder) throws {
         let value = try decoder.singleValueContainer().decode(String.self)
         switch value {
-        case "shade", "compression": self = .shade
+        case "shade", "compression": self = .minimize
+        case "appHide": self = .appHide
         case "minimize": self = .minimize
         default: throw DecodingError.dataCorrupted(.init(codingPath:decoder.codingPath,debugDescription:"Unknown top hide mode"))
         }
@@ -135,9 +142,8 @@ struct HoverSettings: Codable, Equatable {
         let legacyMinimize = try values.decodeIfPresent(Bool.self,forKey:.topMinimizeEnabled) ?? false
         topEnabled = try values.decodeIfPresent(Bool.self,forKey:.topEnabled)
             ?? values.decodeIfPresent(Bool.self,forKey:.topCompressionEnabled) ?? legacyMinimize
-        // Keep the old decoder/backend for recovery. New hides only minimize.
-        _ = try values.decodeIfPresent(TopHideMode.self,forKey:.topHideMode)
-        topHideMode = .minimize
+        // Legacy titlebar/compression choices remain minimization after migration.
+        topHideMode = try values.decodeIfPresent(TopHideMode.self,forKey:.topHideMode) ?? .minimize
         allowSpaceSwitch = try values.decodeIfPresent(Bool.self,forKey:.allowSpaceSwitch) ?? true
     }
     func encode(to encoder: Encoder) throws {
@@ -191,11 +197,12 @@ final class BindingStore {
         guard let index = next.firstIndex(where:{$0.id == id}) else { return }
         next[index].shortcut = shortcut; try save(next)
     }
-    func configure(_ id: UUID, edge: WindowEdge? = nil, windowTitle: String? = nil, changeWindow: Bool = false) throws {
+    func configure(_ id: UUID, edge: WindowEdge? = nil, windowTitle: String? = nil, changeWindow: Bool = false, topHideMode: TopHideMode? = nil, changeTopHideMode: Bool = false) throws {
         var next = bindings
         guard let index = next.firstIndex(where:{$0.id == id}) else { return }
         if let edge { next[index].edge = edge }
         if changeWindow { next[index].windowTitle = windowTitle }
+        if changeTopHideMode { next[index].topHideMode = topHideMode }
         try save(next)
     }
     func configureHover(enabled: Bool? = nil, showDelay: Double? = nil, hideDelay: Double? = nil,

@@ -39,11 +39,22 @@ private func near(_ a: CGPoint,_ b: CGPoint) -> Bool { abs(a.x-b.x) < 2 && abs(a
 private func onScreenWindows() -> [[String:Any]] {
     CGWindowListCopyWindowInfo([.optionOnScreenOnly,.excludeDesktopElements],kCGNullWindowID) as? [[String:Any]] ?? []
 }
-enum WindowAnimationMode: String { case windowMove, windowResize, systemMinimize }
+enum WindowAnimationMode: String { case windowMove, windowResize, systemMinimize, systemHide }
+struct ProcessStart: Codable, Equatable {
+    let seconds: UInt64
+    let microseconds: UInt64
+    static func read(_ pid: pid_t) -> ProcessStart? {
+        guard pid > 0 else { return nil }
+        var info = proc_bsdinfo()
+        guard proc_pidinfo(pid,PROC_PIDTBSDINFO,0,&info,Int32(MemoryLayout<proc_bsdinfo>.size)) == MemoryLayout<proc_bsdinfo>.size else { return nil }
+        return ProcessStart(seconds:info.pbi_start_tvsec,microseconds:info.pbi_start_tvusec)
+    }
+}
+enum ProcessIdentity { case same, gone, unknown }
 enum WindowHideStrategy: String, Codable {
     case edgeMove, compression, minimize, shade, parked, appHide
     var animationMode: WindowAnimationMode {
-        switch self { case .edgeMove, .shade, .parked, .appHide: return .windowMove; case .compression: return .windowResize; case .minimize: return .systemMinimize }
+        switch self { case .edgeMove, .shade, .parked: return .windowMove; case .appHide: return .systemHide; case .compression: return .windowResize; case .minimize: return .systemMinimize }
     }
 }
 struct WindowRecovery: Codable {
@@ -53,9 +64,11 @@ struct WindowRecovery: Codable {
     let bundle: String
     let title: String
     var original: CGRect
+    var processStart: ProcessStart? = nil
     var applicationHidden: Bool? = nil // True only after journaling our own app hide.
+    var hiddenSpaceIDs: [UInt64]? = nil
+    // Decode old journals only. New operations never park or create title bars.
     var parkedFrame: CGRect? = nil
-    var shadeFrame: CGRect? = nil
     var shadeSpaceIDs: [UInt64]? = nil
     var windowNumber: CGWindowID? = nil
     var hideStrategy: WindowHideStrategy? = nil
@@ -72,6 +85,7 @@ private final class ManagedWindow {
     var generation = 0
     var tuckedOrigin: CGPoint?
     var revealWidth: CGFloat = 0
+    var recalledWith: ApplicationRecallMethod?
     init(_ element: AXUIElement,_ record: WindowRecovery,_ number: CGWindowID) {
         self.element = element; recovery = record; self.number = number
     }
@@ -85,14 +99,13 @@ final class WindowController {
     private var pendingToggles = Set<UUID>()
     private var pendingReveals = Set<UUID>()
     private var detachedIDs = Set<UUID>() // Main queue only; discard late callbacks after removal.
-    private var unsupportedCompression = Set<CGWindowID>() // Worker queue only.
-    private var failedParking: [CGWindowID:(frame:CGRect,screens:[CGRect],until:TimeInterval)] = [:]
     private var quitting = false
     private var hoverRefreshPending = false // Main queue only.
     private let epochLock = NSLock()
     private var epoch = 0
     private var observer: NSObjectProtocol?
     private let recoveryURL: URL
+    private let recallMemory: ApplicationRecallMemory
     var onWindowState: ((HoverWindow)->Void)?
     var onWindowRemoved: ((UUID)->Void)?
     var onBindingStatus: ((UUID,String,Bool)->Void)?
@@ -103,7 +116,8 @@ final class WindowController {
     private func respectUserInteraction() throws {
         if interactionProvider() { throw WindowInterruption.userInteraction }
     }
-    init(recoveryURL: URL? = nil) {
+    init(recoveryURL: URL? = nil,recallDefaults: UserDefaults = .standard) {
+        recallMemory = ApplicationRecallMemory(defaults:recallDefaults)
         self.recoveryURL = recoveryURL ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Peek/window-recovery.json")
         observer = NSWorkspace.shared.notificationCenter.addObserver(forName:NSWorkspace.activeSpaceDidChangeNotification,object:nil,queue:.main) { [weak self] _ in
             guard let self else { return }; self.epochLock.lock(); self.epoch += 1; self.epochLock.unlock()
@@ -118,9 +132,34 @@ final class WindowController {
         try FileManager.default.createDirectory(at:recoveryURL.deletingLastPathComponent(),withIntermediateDirectories:true)
         try JSONEncoder().encode(Array(records.values)).write(to:recoveryURL,options:.atomic)
     }
-    private func alive(_ record: WindowRecovery) -> Bool {
-        guard let app = NSRunningApplication(processIdentifier:record.pid),app.bundleIdentifier == record.bundle,let launch = app.launchDate else { return false }
-        return abs(launch.timeIntervalSince1970-record.launch)<0.001 && !app.isTerminated
+    private func processIdentity(_ record: WindowRecovery) -> ProcessIdentity {
+        guard record.pid > 0 else { return .unknown }
+        if let current = ProcessStart.read(record.pid),let saved = record.processStart {
+            return current == saved ? .same:.gone
+        }
+        if kill(record.pid,0) != 0 && errno == ESRCH { return .gone }
+        // Old journals have AppKit's launch date, which differs slightly from
+        // the kernel timestamp. Missing AppKit metadata is unknown, not death.
+        guard record.processStart == nil else { return .unknown }
+        return DispatchQueue.main.sync {
+            guard let app = NSRunningApplication(processIdentifier:record.pid),
+                  app.bundleIdentifier == record.bundle,let launch = app.launchDate,
+                  abs(launch.timeIntervalSince1970-record.launch)<0.001,!app.isTerminated else { return .unknown }
+            return .same
+        }
+    }
+    private func alive(_ record: WindowRecovery) -> Bool { processIdentity(record) == .same }
+    private func application(_ record: WindowRecovery) throws -> NSRunningApplication {
+        switch processIdentity(record) {
+        case .gone: throw PeekError.message(L("原应用进程已结束或已重启，已停止操作旧窗口。"))
+        case .unknown: throw PeekError.message(L("应用身份暂时无法确认，已保留恢复记录，请稍后重试。"))
+        case .same: break
+        }
+        for _ in 0..<20 {
+            if let app = DispatchQueue.main.sync(execute:{ NSRunningApplication(processIdentifier:record.pid) }) { return app }
+            Thread.sleep(forTimeInterval:0.025)
+        }
+        throw PeekError.message(L("应用状态暂时无法读取，已保留恢复记录，请稍后重试。"))
     }
     private func compressionAlreadyRestored(_ record: WindowRecovery) -> Bool {
         guard record.hideStrategy == .compression,let number = record.windowNumber else { return false }
@@ -141,11 +180,17 @@ final class WindowController {
     private func recoveredElement(_ record: WindowRecovery) -> AXUIElement? {
         guard alive(record),let number = record.windowNumber else { return nil }
         let app = AXUIElementCreateApplication(record.pid); AXUIElementSetMessagingTimeout(app,0.35)
-        guard let candidates = axRead(app,kAXWindowsAttribute) as? [AXUIElement] else { return nil }
-        let matching = candidates.filter { axWindowNumber($0) == number }
-        guard matching.count == 1 else { return nil }
-        AXUIElementSetMessagingTimeout(matching[0],0.25)
-        return matching[0]
+        var candidates = axRead(app,kAXWindowsAttribute) as? [AXUIElement] ?? []
+        // Some apps omit AXWindows during activation but publish the main or
+        // focused element. All candidates must still have the exact saved ID.
+        for key in [kAXFocusedWindowAttribute,kAXMainWindowAttribute] {
+            if let value = axRead(app,key),CFGetTypeID(value) == AXUIElementGetTypeID() {
+                candidates.append(value as! AXUIElement)
+            }
+        }
+        guard let matching = candidates.first(where:{ axWindowNumber($0) == number }) else { return nil }
+        AXUIElementSetMessagingTimeout(matching,0.25)
+        return matching
     }
     private func select(_ binding: AppBinding,allowOtherSpaces: Bool = false) throws -> ManagedWindow {
         if let existing = windows[binding.id] {
@@ -160,6 +205,16 @@ final class WindowController {
         // Retry any saved crash recovery before selecting a fresh window.
         if let saved = records[binding.id],alive(saved),saved.windowNumber == nil {
             throw PeekError.message(L("旧恢复记录缺少窗口 ID。请手动恢复窗口，退出并重开目标应用后重试；不会按标题猜测窗口。"))
+        }
+        // Reattach an owned app hide without requiring hidden AXWindows first.
+        // The application element is only a placeholder: explicit recall must
+        // activate, then replace it with the exact journaled window ID before
+        // any window action. Discovery skips detached recovery records.
+        if let saved = records[binding.id],saved.hideStrategy == .appHide,
+           saved.applicationHidden == true,alive(saved),let number = saved.windowNumber {
+            let target = ManagedWindow(recoveredElement(saved) ?? AXUIElementCreateApplication(saved.pid),saved,number)
+            target.hidden = true; windows[binding.id] = target
+            return target
         }
         guard records[binding.id] == nil || restoreRecord(binding.id,allowSpaceSwitch:allowOtherSpaces) else {
             throw PeekError.message(L("窗口尚未恢复，请打开目标应用后再按快捷键重试。"))
@@ -206,7 +261,7 @@ final class WindowController {
         var writable = DarwinBoolean(false)
         guard AXUIElementIsAttributeSettable(selected,kAXPositionAttribute as CFString,&writable) == .success,writable.boolValue else { throw PeekError.message(L("这个窗口不支持位置控制。")) }
         let title = axRead(selected,kAXTitleAttribute) as? String ?? ""
-        let record = WindowRecovery(bindingID:binding.id,pid:app.processIdentifier,launch:launch.timeIntervalSince1970,bundle:binding.bundleID,title:title,original:frame,windowNumber:number)
+        let record = WindowRecovery(bindingID:binding.id,pid:app.processIdentifier,launch:launch.timeIntervalSince1970,bundle:binding.bundleID,title:title,original:frame,processStart:ProcessStart.read(app.processIdentifier),windowNumber:number)
         let managed = ManagedWindow(selected,record,number); windows[binding.id] = managed
         return managed
     }
@@ -216,85 +271,170 @@ final class WindowController {
         return list.contains { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == number &&
             ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == record.pid }
     }
-    private func shadeMembership(_ record: WindowRecovery) -> WindowSpaceMembership {
+    private func applicationMembership(_ record: WindowRecovery) -> WindowSpaceMembership {
         guard let number = record.windowNumber else { return .unknown }
         let direct = WindowSpaces.membership(number)
         // App hide removes windows from public WindowServer listings. Retain
         // their last confirmed Space assignment before hiding, not visibility.
         if direct == .unknown,record.hideStrategy == .appHide,
-           let assigned = record.shadeSpaceIDs,let active = WindowSpaces.activeSpaceIDs() {
+           let assigned = record.hiddenSpaceIDs ?? record.shadeSpaceIDs,let active = WindowSpaces.activeSpaceIDs() {
             return WindowSpaces.classify(assigned:Set(assigned),active:active)
         }
         return direct
     }
-    private func saveShade(_ target: ManagedWindow) throws {
-        records[target.recovery.bindingID] = target.recovery; try persist()
-    }
-    private func singleWindowApplication(_ target: ManagedWindow,screens: [CGRect]) -> Bool {
-        let app = AXUIElementCreateApplication(target.recovery.pid)
-        AXUIElementSetMessagingTimeout(app,0.35)
-        // Count all AX windows, including minimized windows and dialogs. Unknown
-        // identities or omitted visible siblings cannot authorize an app-wide hide.
-        guard let list = axRead(app,kAXWindowsAttribute) as? [AXUIElement],list.count == 1,
-              axWindowNumber(list[0]) == target.number,
-              let all = CGWindowListCopyWindowInfo(.optionAll,kCGNullWindowID) as? [[String:Any]] else {
-            output("shade_app_hide_rejected",["reason":"AX window count or identity unknown"]); return false
-        }
-        let siblings = all.filter { info in
-            guard (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == target.recovery.pid,
-                  (info[kCGWindowLayer as String] as? Int) == 0,
-                  (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value != target.number else { return false }
-            // AppKit retains non-shareable, off-screen menu-bar backing surfaces
-            // at layer zero. They are not user windows. Exclude only that exact
-            // geometry; any other unknown layer-zero surface blocks app hide.
-            if (info[kCGWindowSharingState as String] as? Int) == 0,
-               (info[kCGWindowIsOnscreen as String] as? Bool) != true,
-               let data = info[kCGWindowBounds as String] as? [String:Any],
-               let bounds = CGRect(dictionaryRepresentation:data as CFDictionary),
-               screens.contains(where:{ near(bounds.origin,$0.origin) && abs(bounds.width-$0.width)<2 && bounds.height > 0 && bounds.height <= 32 }) { return false }
-            return true
-        }
-        if !siblings.isEmpty { output("shade_app_hide_rejected",["reason":"WindowServer siblings","count":siblings.count]) }
-        return siblings.isEmpty
-    }
-    private func handOffShadeFocus(_ target: ManagedWindow) -> Bool {
-        guard let app = NSRunningApplication(processIdentifier:target.recovery.pid) else { return false }
-        if !app.isActive { return true }
-        // Activate only an already visible window on this Space. Hiding the
-        // foreground application without a successor can unexpectedly switch Space.
-        for info in onScreenWindows() {
-            guard (info[kCGWindowLayer as String] as? Int) == 0,
-                  let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
-                  pid != target.recovery.pid,pid != ProcessInfo.processInfo.processIdentifier,
-                  let number = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
-                  WindowSpaces.membership(number) == .current,
-                  let candidate = NSRunningApplication(processIdentifier:pid),candidate.activationPolicy == .regular else { continue }
-            let application = AXUIElementCreateApplication(pid); AXUIElementSetMessagingTimeout(application,0.25)
-            guard let windows = axRead(application,kAXWindowsAttribute) as? [AXUIElement],
-                  let window = windows.first(where:{axWindowNumber($0) == number}) else { continue }
-            _ = AXUIElementSetAttributeValue(window,kAXMainAttribute as CFString,kCFBooleanTrue)
-            _ = AXUIElementSetAttributeValue(application,kAXFrontmostAttribute as CFString,kCFBooleanTrue)
-            for _ in 0..<12 where app.isActive { Thread.sleep(forTimeInterval:0.025) }
-            return !app.isActive
-        }
-        return false
-    }
-    private func unhideOwnedApplication(_ target: ManagedWindow) throws {
+    private func unhideOwnedApplication(_ target: ManagedWindow,activate: Bool = false) throws {
         guard target.recovery.hideStrategy == .appHide,target.recovery.applicationHidden == true,
-              alive(target.recovery),let app = NSRunningApplication(processIdentifier:target.recovery.pid) else {
+              alive(target.recovery) else {
             throw PeekError.message(L("无法确认原窗口的隐藏记录，已保留恢复信息。"))
         }
-        if app.isHidden { _ = app.unhide() }
-        let deadline = ProcessInfo.processInfo.systemUptime+1.5
+        let app = try application(target.recovery)
+        // An external recall may already have completed. Do not queue another
+        // reopen event that could arrive after the user's next hide request.
+        if !app.isHidden,alive(target.recovery),
+           onScreenWindows().contains(where:{($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == target.number}) {
+            if axWindowNumber(target.element) == target.number,axFrame(target.element) != nil { return }
+            if let element = recoveredElement(target.recovery) { target.element = element; return }
+        }
+        let began = ProcessInfo.processInfo.systemUptime
+        let preferred: ApplicationRecallMethod = activate ? recallMemory.preferred(for:target.recovery.bundle):.unhide
+        var method = preferred
+        var triedAlternative = false
+        func issue(_ method: ApplicationRecallMethod) {
+            output("application_recall_method",["bundle":target.recovery.bundle,"method":method.rawValue,
+                "fallback":triedAlternative,"requested_after_ms":(ProcessInfo.processInfo.systemUptime-began)*1000])
+            switch method {
+            case .unhide:
+                DispatchQueue.main.sync {
+                    _ = app.unhide()
+                    if activate { _ = app.activate(options:[]) }
+                }
+                let appAX = AXUIElementCreateApplication(target.recovery.pid)
+                AXUIElementSetMessagingTimeout(appAX,0.35)
+                _ = AXUIElementSetAttributeValue(appAX,kAXHiddenAttribute as CFString,kCFBooleanFalse)
+                if activate {
+                    let result = AXUIElementSetAttributeValue(appAX,kAXFrontmostAttribute as CFString,kCFBooleanTrue)
+                    output("application_recall_requested",["pid":target.recovery.pid,"AX_frontmost":result.rawValue])
+                }
+            case .reopen:
+                guard let url = app.bundleURL else { return }
+                let pid = target.recovery.pid
+                let start = ProcessStart.read(pid)
+                DispatchQueue.main.async {
+                    guard let start,ProcessStart.read(pid) == start else { return }
+                    let configuration = NSWorkspace.OpenConfiguration()
+                    configuration.activates = true
+                    configuration.createsNewApplicationInstance = false
+                    configuration.addsToRecentItems = false
+                    NSWorkspace.shared.openApplication(at:url,configuration:configuration) { reopened,error in
+                        output("application_reopen_requested",["pid":pid,"same_process":reopened?.processIdentifier == pid,"accepted":error == nil])
+                    }
+                }
+            }
+        }
+        issue(method)
         repeat {
-            if !app.isHidden,let element = recoveredElement(target.recovery) {
-                target.element = element; return
+            if activate { try respectUserInteraction() }
+            if !app.isHidden,alive(target.recovery),
+               onScreenWindows().contains(where:{($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == target.number}) {
+                var ready = axWindowNumber(target.element) == target.number && axFrame(target.element) != nil
+                if !ready,let element = recoveredElement(target.recovery) { target.element = element; ready = true }
+                if ready {
+                    if activate { target.recalledWith = method }
+                    output("application_recalled",["bundle":target.recovery.bundle,"method":method.rawValue,
+                        "fallback":triedAlternative,"elapsed_ms":(ProcessInfo.processInfo.systemUptime-began)*1000])
+                    return
+                }
+            }
+            // A learned method runs immediately. Only an unsuccessful first
+            // method incurs the compatibility wait before trying its alternative.
+            if activate,!triedAlternative,ProcessInfo.processInfo.systemUptime-began >= 0.4,alive(target.recovery) {
+                triedAlternative = true; method = preferred.alternative; issue(method)
             }
             Thread.sleep(forTimeInterval:0.025)
-        } while ProcessInfo.processInfo.systemUptime < deadline
-        throw PeekError.message(L("应用尚未恢复可见，已保留标题条恢复记录。"))
+        } while ProcessInfo.processInfo.systemUptime-began < 3.5
+        throw PeekError.message(L("应用尚未恢复可见，已保留恢复记录。"))
     }
-    private func waitShadeFrame(_ target: ManagedWindow,_ frame: CGRect) -> Bool {
+    private func setApplicationVisibility(_ target: ManagedWindow,binding: AppBinding,show: Bool?,frontPID: pid_t?,
+                                          settings: HoverSettings,screens: [CGRect],epoch: Int,source: String) throws -> HoverWindow {
+        let began = ProcessInfo.processInfo.systemUptime
+        target.recalledWith = nil
+        let app = try application(target.recovery)
+        let owned = target.recovery.hideStrategy == .appHide && target.recovery.applicationHidden == true
+        guard !app.isHidden || owned else {
+            throw PeekError.message(L("应用由你隐藏；请先从 Dock 显示应用。"))
+        }
+        let canHide = frontPID == target.recovery.pid || (frontPID == ProcessInfo.processInfo.processIdentifier && target.hasShown)
+        let hide = show.map { !$0 } ?? (!target.hidden && !app.isHidden && canHide)
+        // Repeated hide requests must not unhide the app just to inspect AX.
+        if hide,app.isHidden,let snapshot = applicationSnapshot(target,binding:binding,screens:screens,allowOtherSpaces:settings.allowSpaceSwitch) {
+            return snapshot
+        }
+        let membership = applicationMembership(target.recovery)
+        guard membership == .current || (!hide && settings.allowSpaceSwitch && membership == .other) else {
+            throw PeekError.message(L("目标窗口不在当前桌面或归属未知；请手动切换，或开启“允许切换桌面”。"))
+        }
+        try respectUserInteraction()
+        if hide {
+            guard settings.topEnabled else { throw PeekError.message(L("顶部收放已关闭。请在“通用”开启，或选择底部、左侧、右侧。")) }
+            guard axWindowNumber(target.element) == target.number,
+                  (axRead(target.element,"AXFullScreen") as? Bool) != true,
+                  (axRead(target.element,kAXMinimizedAttribute) as? Bool) == false,
+                  let frame = axFrame(target.element),serverOwns(target.recovery),
+                  onScreenWindows().contains(where:{($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == target.number}) else {
+                throw PeekError.message(L("目标窗口状态无法确认，未执行收放。"))
+            }
+            let old = target.recovery
+            target.recovery = WindowRecovery(bindingID:old.bindingID,pid:old.pid,launch:old.launch,bundle:old.bundle,
+                title:old.title,original:frame,processStart:old.processStart ?? ProcessStart.read(old.pid),applicationHidden:true,
+                hiddenSpaceIDs:WindowSpaces.assignedSpaceIDs(target.number).map { Array($0) },
+                windowNumber:target.number,hideStrategy:.appHide)
+            records[binding.id] = target.recovery; try persist()
+            try respectUserInteraction()
+            guard spaceEpoch() == epoch,!app.isHidden else { throw PeekError.message(L("应用或桌面状态改变，已停止收起。")) }
+            let accepted = DispatchQueue.main.sync { app.hide() }
+            output("application_hide_requested",["accepted":accepted,"binding":binding.id.uuidString])
+            let deadline = ProcessInfo.processInfo.systemUptime+1.5
+            repeat {
+                guard alive(target.recovery) else { throw PeekError.message(L("应用身份暂时无法确认，已保留恢复记录，请稍后重试。")) }
+                if app.isHidden,!onScreenWindows().contains(where:{($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == target.recovery.pid && ($0[kCGWindowLayer as String] as? Int) == 0}) { break }
+                guard ProcessInfo.processInfo.systemUptime < deadline else { throw PeekError.message(L("应用隐藏尚未确认，已尝试恢复。")) }
+                Thread.sleep(forTimeInterval:0.025)
+            } while true
+            target.hidden = true; target.hasShown = false
+        } else {
+            if owned { try unhideOwnedApplication(target,activate:true) }
+            guard axWindowNumber(target.element) == target.number,
+                  (axRead(target.element,"AXFullScreen") as? Bool) != true,
+                  (axRead(target.element,kAXMinimizedAttribute) as? Bool) == false else {
+                throw PeekError.message(L("目标窗口状态无法确认，未执行收放。"))
+            }
+            try focus(target,allowSpaceSwitch:settings.allowSpaceSwitch)
+            let deadline = ProcessInfo.processInfo.systemUptime+2.5
+            repeat {
+                try respectUserInteraction()
+                let focused = axRead(AXUIElementCreateApplication(target.recovery.pid),kAXFocusedWindowAttribute)
+                if !app.isHidden,WindowSpaces.membership(target.number) == .current,
+                   let focused,CFGetTypeID(focused) == AXUIElementGetTypeID(),axWindowNumber(focused as! AXUIElement) == target.number,
+                   onScreenWindows().contains(where:{($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == target.number}),
+                   let actual = axFrame(target.element) {
+                    target.recovery.original = actual; break
+                }
+                guard ProcessInfo.processInfo.systemUptime < deadline else { throw PeekError.message(L("同一窗口的位置或焦点尚未恢复，未记作召回成功。")) }
+                Thread.sleep(forTimeInterval:0.025)
+            } while true
+            target.hidden = false; target.hasShown = true
+            if let method = target.recalledWith { recallMemory.remember(method,for:target.recovery.bundle) }
+        }
+        let frame = target.recovery.original
+        guard let screen = screens.max(by:{ a,b in
+            let aa = a.intersection(frame),bb = b.intersection(frame)
+            return (aa.isNull ? 0:aa.width*aa.height) < (bb.isNull ? 0:bb.width*bb.height)
+        }),screen.intersects(frame) else { throw PeekError.message(L("原显示器已断开，请恢复窗口后重新绑定。")) }
+        output("window_toggle",["success":true,"bundle":binding.bundleID,"hidden":hide,"backend":"appHide","animation_mode":"systemHide","source":source,"duration_ms":(ProcessInfo.processInfo.systemUptime-began)*1000])
+        return HoverWindow(id:binding.id,edge:.top,screen:screen,frame:frame,hidden:hide,manualHide:hide && source == "hotkey",
+            pid:target.recovery.pid,onCurrentSpace:applicationMembership(target.recovery) == .current)
+    }
+    private func waitRestoredFrame(_ target: ManagedWindow,_ frame: CGRect) -> Bool {
         let deadline = ProcessInfo.processInfo.systemUptime+1.2
         var stable = 0
         repeat {
@@ -307,86 +447,10 @@ final class WindowController {
         } while ProcessInfo.processInfo.systemUptime < deadline
         return false
     }
-    private func hideShade(_ target: ManagedWindow,screens: [CGRect],epoch: Int) throws {
-        let original = target.recovery.original
-        let desktop = screens.reduce(CGRect.null) { $0.union($1) }
-        guard !desktop.isNull else { throw PeekError.message(L("无法读取显示器范围。")) }
-        // Horizontal parking preserves the titlebar's y coordinate. AppKit often
-        // clamps vertical movement; no resize or private WindowServer writes.
-        let cached = failedParking[target.number]
-        let recentlyRejected = cached.map { $0.frame == original && $0.screens == screens && $0.until > ProcessInfo.processInfo.systemUptime } ?? false
-        let candidates = recentlyRejected ? []:[CGPoint(x:desktop.maxX+32,y:original.minY),
-                          CGPoint(x:desktop.minX-original.width-32,y:original.minY)]
-        for point in candidates {
-            try respectUserInteraction()
-            guard spaceEpoch() == epoch,WindowSpaces.membership(target.number) == .current,
-                  alive(target.recovery),axWindowNumber(target.element) == target.number else {
-                throw PeekError.message(L("窗口或桌面状态改变，已停止收起。"))
-            }
-            let planned = CGRect(origin:point,size:original.size)
-            target.recovery.hideStrategy = .parked; target.recovery.parkedFrame = planned
-            try saveShade(target) // Journal before every write, including a rejected attempt.
-            let moved = axMove(target.element,point)
-            if moved && waitShadeFrame(target,planned),
-               screens.allSatisfy({!$0.intersects(planned)}) {
-                target.tuckedOrigin = planned.origin
-                target.hidden = true
-                return
-            }
-            if let actual = axFrame(target.element) {
-                target.recovery.parkedFrame = actual; try saveShade(target)
-            }
-            try respectUserInteraction()
-            guard spaceEpoch() == epoch,axMove(target.element,original.origin),waitShadeFrame(target,original) else {
-                throw PeekError.message(L("屏外停放未完成，保留原窗口恢复记录。"))
-            }
-        }
-        if !candidates.isEmpty {
-            failedParking[target.number] = (original,screens,ProcessInfo.processInfo.systemUptime+30)
-        }
-        try respectUserInteraction()
-        guard singleWindowApplication(target,screens:screens) else {
-            throw PeekError.message(L("这个窗口无法停到屏外；应用还有其他窗口或窗口数量无法确认，未隐藏整个应用。可明确选择“最小化”。"))
-        }
-        guard handOffShadeFocus(target),spaceEpoch() == epoch,WindowSpaces.membership(target.number) == .current,
-              singleWindowApplication(target,screens:screens) else {
-            throw PeekError.message(L("当前无法安全隐藏应用，窗口已保持原状。"))
-        }
-        target.recovery.hideStrategy = .appHide; target.recovery.applicationHidden = true
-        target.recovery.parkedFrame = nil; try saveShade(target)
-        guard let app = NSRunningApplication(processIdentifier:target.recovery.pid),!app.isHidden else {
-            throw PeekError.message(L("应用可见状态改变，已停止收起。"))
-        }
-        let hideResult = app.hide()
-        output("shade_app_hide_requested",["accepted":hideResult])
-        let deadline = ProcessInfo.processInfo.systemUptime+1.5
-        repeat {
-            guard alive(target.recovery),spaceEpoch() == epoch else { throw PeekError.message(L("桌面或应用状态改变，已保留隐藏恢复记录。")) }
-            if app.isHidden,alive(target.recovery),
-               !onScreenWindows().contains(where:{($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == target.number}) {
-                target.hidden = true; return
-            }
-            Thread.sleep(forTimeInterval:0.025)
-        } while ProcessInfo.processInfo.systemUptime < deadline
-        output("shade_app_hide_observed",["hidden":app.isHidden,"server_identity":serverOwns(target.recovery),"onscreen":onScreenWindows().contains(where:{($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == target.number}),"AX_hidden":axRead(AXUIElementCreateApplication(target.recovery.pid),kAXHiddenAttribute) as? Bool ?? false])
-        throw PeekError.message(L("应用隐藏尚未确认，已尝试恢复。"))
-    }
-    private func revealShade(_ target: ManagedWindow,shown: CGPoint,focusPrepared: Bool) throws {
-        if target.recovery.hideStrategy == .appHide { try unhideOwnedApplication(target) }
-        guard alive(target.recovery),axWindowNumber(target.element) == target.number else { throw PeekError.message(L("原窗口暂时无法读取。")) }
-        try respectUserInteraction()
-        guard axMove(target.element,shown),waitShadeFrame(target,CGRect(origin:shown,size:target.recovery.original.size)) else {
-            throw PeekError.message(L("原窗口位置尚未恢复，已保留恢复记录。"))
-        }
-        if !focusPrepared { try focus(target) }
-        guard let actual = axFrame(target.element),sameSize(actual.size,target.recovery.original.size) else {
-            throw PeekError.message(L("窗口尺寸发生变化，已停止操作。"))
-        }
-    }
-    private func restoreShade(_ target: ManagedWindow) -> Bool {
-        guard alive(target.recovery) else { return true }
+    private func restoreLegacyOrHiddenApplication(_ target: ManagedWindow) -> Bool {
+        guard alive(target.recovery) else { return processIdentity(target.recovery) == .gone }
         if target.recovery.hideStrategy == .appHide {
-            guard shadeMembership(target.recovery) == .current else { return false }
+            guard applicationMembership(target.recovery) == .current else { return false }
             do { try unhideOwnedApplication(target) } catch { return false }
             return true // Hiding did not alter geometry.
         }
@@ -402,36 +466,34 @@ final class WindowController {
             return false // Unknown ownership: retain the journal instead of undoing user edits.
         }
         guard axMove(target.element,target.recovery.original.origin) else { return false }
-        return waitShadeFrame(target,CGRect(origin:target.recovery.original.origin,size:actual.size))
+        return waitRestoredFrame(target,CGRect(origin:target.recovery.original.origin,size:actual.size))
     }
-    private func shadeSnapshot(_ target: ManagedWindow,binding: AppBinding,screens: [CGRect],allowOtherSpaces: Bool) -> HoverWindow? {
+    private func applicationSnapshot(_ target: ManagedWindow,binding: AppBinding,screens: [CGRect],allowOtherSpaces: Bool) -> HoverWindow? {
         guard alive(target.recovery),
-              target.recovery.hideStrategy == .appHide || (target.recovery.hideStrategy == .parked && serverOwns(target.recovery)) else { return nil }
-        let membership = shadeMembership(target.recovery)
+              target.recovery.hideStrategy == .appHide else { return nil }
+        let membership = applicationMembership(target.recovery)
         guard membership == .current || (allowOtherSpaces && membership == .other) else { return nil }
-        let appHidden = NSRunningApplication(processIdentifier:target.recovery.pid)?.isHidden == true
+        guard let app = DispatchQueue.main.sync(execute:{ NSRunningApplication(processIdentifier:target.recovery.pid) }) else { return nil }
+        let appHidden = app.isHidden
         let actual = serverFrame(target.number)
         // External reveal (Dock, Command-Tab, new window) ends ownership; don't
         // hide the application again merely because a sibling became visible.
-        let externallyShown = target.recovery.hideStrategy == .appHide ? !appHidden :
-            actual.map { frame in screens.contains {
-                let area = $0.intersection(frame)
-                return !area.isNull && area.width*area.height > frame.width*frame.height*0.5
-            } } == true
-        if externallyShown,let actual {
+        let externallyShown = !appHidden
+        if externallyShown,serverOwns(target.recovery),let actual,
+           onScreenWindows().contains(where:{($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == target.number}) {
             target.hidden = false; target.hasShown = true; target.recovery.original = actual
-            target.recovery.hideStrategy = nil; target.recovery.applicationHidden = nil; target.recovery.parkedFrame = nil
+            target.recovery.hideStrategy = nil; target.recovery.applicationHidden = nil; target.recovery.hiddenSpaceIDs = nil; target.recovery.parkedFrame = nil
             records.removeValue(forKey:binding.id); try? persist()
             guard let screen = screens.first(where:{$0.intersects(actual)}) else { return nil }
             return HoverWindow(id:binding.id,edge:.top,screen:screen,frame:actual,hidden:false,pid:target.recovery.pid,onCurrentSpace:membership == .current)
         }
-        let frame = target.recovery.shadeFrame ?? target.recovery.original
+        guard appHidden else { return nil }
+        let frame = target.recovery.original
         guard let screen = screens.max(by:{a,b in
             let aa = a.intersection(frame),bb = b.intersection(frame)
             return (aa.isNull ? 0:aa.width*aa.height) < (bb.isNull ? 0:bb.width*bb.height)
         }),screen.intersects(frame) else { return nil }
-        return HoverWindow(id:binding.id,edge:.top,screen:screen,frame:frame,hidden:true,pid:target.recovery.pid,
-            compressedFrame:CGRect(x:frame.minX,y:frame.minY,width:frame.width,height:24),shadeTitle:binding.name,onCurrentSpace:membership == .current)
+        return HoverWindow(id:binding.id,edge:.top,screen:screen,frame:frame,hidden:true,pid:target.recovery.pid,onCurrentSpace:membership == .current)
     }
     private func setMinimized(_ minimized: Bool,_ target: ManagedWindow) throws {
         guard alive(target.recovery),axWindowNumber(target.element) == target.number else { throw PeekError.message(L("目标窗口身份已改变，已停止操作。")) }
@@ -457,115 +519,6 @@ final class WindowController {
         throw PeekError.message(L("最小化状态未确认；保留恢复记录，不记作收起成功。"))
     }
     private func sameSize(_ a: CGSize,_ b: CGSize) -> Bool { abs(a.width-b.width)<2 && abs(a.height-b.height)<2 }
-    private func rememberCompression(_ target: ManagedWindow,_ frame: CGRect,inProgress: Bool) throws {
-        target.recovery.compressedFrame = frame; target.recovery.compressionInProgress = inProgress
-        records[target.recovery.bindingID] = target.recovery; try persist()
-    }
-    private func synchronizeCompression(_ target: ManagedWindow,_ actual: CGRect) throws {
-        guard target.recovery.hideStrategy == .compression,target.hidden,let compact = target.recovery.compressedFrame else { return }
-        if target.recovery.compressionInProgress == true && (!sameSize(actual.size,compact.size) || !near(actual.origin,compact.origin)) {
-            throw PeekError.message(L("压缩中断后的尺寸归属无法确认，已保留恢复记录；请手动恢复窗口，退出并重开目标应用后重试。"))
-        }
-        if !sameSize(actual.size,compact.size) {
-            // An external resize belongs to the user. A mere move of the strip
-            // must not replace the saved expanded height with its folded height.
-            target.hidden = false; target.hasShown = true; target.generation += 1
-            target.recovery.original = actual; target.recovery.hideStrategy = nil
-            target.recovery.compressedFrame = nil; target.recovery.compressionInProgress = nil
-            records.removeValue(forKey:target.recovery.bindingID); try persist()
-        } else if !near(actual.origin,compact.origin) {
-            target.recovery.original.origin = actual.origin
-            try rememberCompression(target,actual,inProgress:false)
-        }
-    }
-    private func compress(_ target: ManagedWindow,hide: Bool,shown: CGPoint,duration: Double,epoch: Int,focusPrepared: Bool) throws -> CGRect {
-        if hide && unsupportedCompression.contains(target.number) {
-            throw PeekError.message(L("这个窗口无法压成细条；请使用左右收起或自行选择最小化。"))
-        }
-        func checkIdentity() throws {
-            try respectUserInteraction()
-            guard spaceEpoch() == epoch else { throw PeekError.message(L("桌面已切换，停止压缩并保留恢复记录。")) }
-            guard alive(target.recovery),axWindowNumber(target.element) == target.number,
-                  (axRead(target.element,kAXMinimizedAttribute) as? Bool) == false else {
-                throw PeekError.message(L("窗口身份或可见状态改变，已停止压缩。"))
-            }
-        }
-        try checkIdentity()
-        var writable = DarwinBoolean(false)
-        guard AXUIElementIsAttributeSettable(target.element,kAXSizeAttribute as CFString,&writable) == .success,writable.boolValue else {
-            throw PeekError.message(L("这个窗口不支持高度压缩；不会改用最小化。"))
-        }
-        if !hide && !focusPrepared { try focus(target) }
-        try checkIdentity()
-        guard let initial = axFrame(target.element) else { throw PeekError.message(L("无法读取窗口尺寸。")) }
-        // Some accessibility clients enable native AX frame animations. Do not
-        // change that app-wide setting. Let positioning settle before resizing;
-        // overlapping the two writes can cancel one another's native animation.
-        if !near(initial.origin,shown) {
-            guard axMove(target.element,shown) else { throw PeekError.message(L("顶部位置调整失败。")) }
-            let deadline = ProcessInfo.processInfo.systemUptime+1.5
-            var alignedReads = 0
-            repeat {
-                try checkIdentity()
-                guard let moved = axFrame(target.element) else { throw PeekError.message(L("顶部位置无法读取。")) }
-                try rememberCompression(target,moved,inProgress:true)
-                let server = serverFrame(target.number)
-                alignedReads = near(moved.origin,shown) && server.map({near($0.origin,shown) && sameSize($0.size,moved.size)}) == true ? alignedReads+1:0
-                if alignedReads >= 3 { break }
-                guard ProcessInfo.processInfo.systemUptime < deadline else { throw PeekError.message(L("顶部位置尚未稳定，已停止压缩。")) }
-                Thread.sleep(forTimeInterval:0.025)
-            } while true
-        }
-        guard let start = axFrame(target.element) else { throw PeekError.message(L("无法读取窗口尺寸。")) }
-        let size = target.recovery.original.size
-        let endHeight = hide ? min(10,size.height):size.height
-        try rememberCompression(target,start,inProgress:true)
-        let began = ProcessInfo.processInfo.systemUptime
-        repeat {
-            try checkIdentity()
-            let t = duration == 0 ? 1:min(1,(ProcessInfo.processInfo.systemUptime-began)/duration)
-            let eased = t*t*(3-2*t)
-            let desired = CGSize(width:size.width,height:(start.height+(endHeight-start.height)*eased).rounded())
-            if axFrame(target.element).map({!sameSize($0.size,desired)}) != false {
-                guard axResize(target.element,desired) else { throw PeekError.message(L("窗口拒绝调整高度。")) }
-            }
-            guard let written = axFrame(target.element) else { throw PeekError.message(L("压缩位置无法确认，保留恢复记录。")) }
-            try rememberCompression(target,written,inProgress:true)
-            if t >= 1 { break }; Thread.sleep(forTimeInterval:1.0/60)
-        } while true
-        var previous: CGRect?,stableReads = 0
-        let settleDeadline = ProcessInfo.processInfo.systemUptime+1.5
-        repeat {
-            Thread.sleep(forTimeInterval:0.04); try checkIdentity()
-            guard let observed = axFrame(target.element) else { throw PeekError.message(L("压缩状态无法读取。")) }
-            let server = serverFrame(target.number)
-            stableReads = previous.map { near($0.origin,observed.origin) && sameSize($0.size,observed.size) } == true && server.map({near($0.origin,observed.origin) && sameSize($0.size,observed.size)}) == true ? stableReads+1:0
-            previous = observed; try rememberCompression(target,observed,inProgress:true)
-            if stableReads >= 3 && (hide || sameSize(observed.size,size)) { break }
-            guard ProcessInfo.processInfo.systemUptime < settleDeadline else { throw PeekError.message(L("窗口尺寸尚未稳定，保留恢复记录。")) }
-        } while true
-        output("compression_readback",["x":axFrame(target.element)?.minX ?? -1,"y":axFrame(target.element)?.minY ?? -1,"height":axFrame(target.element)?.height ?? -1,"width":axFrame(target.element)?.width ?? -1,"shown_x":shown.x,"shown_y":shown.y,"visible":onScreenWindows().contains{($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == target.number}])
-        guard let actual = axFrame(target.element),near(actual.origin,shown),abs(actual.width-size.width)<2,
-              onScreenWindows().contains(where:{($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == target.number && ($0[kCGWindowOwnerPID as String] as? Int32) == target.recovery.pid}) else {
-            throw PeekError.message(L("顶部位置或窗口宽度不符，未确认压缩成功。"))
-        }
-        if hide {
-            guard actual.height < size.height-2 else {
-                unsupportedCompression.insert(target.number)
-                throw PeekError.message(L("这个窗口无法继续压缩（实际高度 {0}pt）；正在恢复原尺寸，不会最小化。",Int(actual.height.rounded())))
-            }
-            guard actual.height <= 48 else {
-                unsupportedCompression.insert(target.number)
-                throw PeekError.message(L("这个窗口最低只能压至 {0}pt，无法形成细条；正在恢复原尺寸。",Int(actual.height.rounded())))
-            }
-        } else {
-            let focused = axRead(AXUIElementCreateApplication(target.recovery.pid),kAXFocusedWindowAttribute)
-            guard sameSize(actual.size,size),let focused,CFGetTypeID(focused) == AXUIElementGetTypeID(),
-                  axWindowNumber(focused as! AXUIElement) == target.number else { throw PeekError.message(L("原尺寸或同一窗口的焦点尚未恢复。")) }
-        }
-        try rememberCompression(target,actual,inProgress:false)
-        return actual
-    }
     private func focus(_ target: ManagedWindow,allowSpaceSwitch: Bool = false) throws {
         try respectUserInteraction()
         guard alive(target.recovery),axWindowNumber(target.element) == target.number else {
@@ -578,7 +531,7 @@ final class WindowController {
         let appAX = AXUIElementCreateApplication(target.recovery.pid)
         _ = AXUIElementSetAttributeValue(target.element,kAXMainAttribute as CFString,kCFBooleanTrue)
         let result = AXUIElementSetAttributeValue(appAX,kAXFrontmostAttribute as CFString,kCFBooleanTrue)
-        guard let app = NSRunningApplication(processIdentifier:target.recovery.pid) else { throw PeekError.message(L("目标应用已退出。")) }
+        let app = try application(target.recovery)
         if result != .success { DispatchQueue.main.sync { _ = app.activate(options:[]) } }
         for _ in 0..<8 where !app.isActive { Thread.sleep(forTimeInterval:0.025) }
         guard app.isActive else { throw PeekError.message(L("窗口未能取得焦点，请再按快捷键重试。")) }
@@ -601,13 +554,15 @@ final class WindowController {
                 // Automatic recovery owns saved records; discovery never restores.
                 if self.records[binding.id] != nil && self.windows[binding.id] == nil { continue }
                 if let target = self.windows[binding.id],target.hidden,
-                   target.recovery.hideStrategy == .appHide || target.recovery.hideStrategy == .parked {
-                    if let state = self.shadeSnapshot(target,binding:binding,screens:screens,allowOtherSpaces:allowSpaceSwitch) {
+                   target.recovery.hideStrategy == .appHide {
+                    if let state = self.applicationSnapshot(target,binding:binding,screens:screens,allowOtherSpaces:allowSpaceSwitch) {
                         snapshots.append(state)
                     } else { missing.append(binding.id) }
                     continue
                 }
-                guard let target = try? self.select(binding,allowOtherSpaces:allowSpaceSwitch),let actual = axFrame(target.element) else {
+                guard let target = try? self.select(binding,allowOtherSpaces:allowSpaceSwitch),
+                      NSRunningApplication(processIdentifier:target.recovery.pid)?.isHidden == false,
+                      let actual = axFrame(target.element) else {
                     missing.append(binding.id); continue
                 }
                 let membership = WindowSpaces.membership(target.number)
@@ -617,9 +572,7 @@ final class WindowController {
                 if target.recovery.hideStrategy == .minimize {
                     target.hidden = minimized; target.hasShown = !minimized
                 } else if minimized { missing.append(binding.id); continue } // User-owned minimization.
-                do { try self.synchronizeCompression(target,actual) }
-                catch { missing.append(binding.id); continue }
-                if target.hidden,target.recovery.applicationHidden != true,target.recovery.hideStrategy != .minimize,target.recovery.hideStrategy != .compression,
+                if target.hidden,target.recovery.applicationHidden != true,target.recovery.hideStrategy != .minimize,
                    target.tuckedOrigin.map({ near(actual.origin,$0) }) != true,
                    screens.contains(where: { let area = $0.intersection(actual); return !area.isNull && area.width*area.height > actual.width*actual.height*0.5 }) {
                     target.hidden = false; target.hasShown = true
@@ -633,18 +586,15 @@ final class WindowController {
                 }
                 var frame = target.hidden ? target.recovery.original:actual
                 if target.hidden {
-                    if target.recovery.hideStrategy == .compression { frame = actual }
-                    else {
-                        frame.size = actual.size
-                        if binding.selectedEdge == .left || binding.selectedEdge == .right { frame.origin.y = actual.minY }
-                        else if binding.selectedEdge == .bottom { frame.origin.x = actual.minX }
-                    }
+                    frame.size = actual.size
+                    if binding.selectedEdge == .left || binding.selectedEdge == .right { frame.origin.y = actual.minY }
+                    else if binding.selectedEdge == .bottom { frame.origin.x = actual.minX }
                 }
                 guard let screen = screens.max(by: { a,b in
                     let aa = a.intersection(frame),bb = b.intersection(frame)
                     return (aa.isNull ? 0:aa.width*aa.height) < (bb.isNull ? 0:bb.width*bb.height)
                 }),screen.intersects(frame) else { missing.append(binding.id); continue }
-                snapshots.append(HoverWindow(id:binding.id,edge:binding.selectedEdge,screen:screen,frame:frame,hidden:target.hidden,pid:target.recovery.pid,revealWidth:target.revealWidth,compressedFrame:target.hidden && target.recovery.hideStrategy == .compression ? actual:nil,onCurrentSpace:membership == .current))
+                snapshots.append(HoverWindow(id:binding.id,edge:binding.selectedEdge,screen:screen,frame:frame,hidden:target.hidden,pid:target.recovery.pid,revealWidth:target.revealWidth,onCurrentSpace:membership == .current))
             }
             DispatchQueue.main.async {
                 self.hoverRefreshPending = false
@@ -683,12 +633,16 @@ final class WindowController {
                 try self.respectUserInteraction()
                 let target = try self.select(binding,allowOtherSpaces:animation.allowSpaceSwitch)
                 var currentEpoch = self.spaceEpoch(); mutationEpoch = currentEpoch
-                if target.recovery.hideStrategy == .appHide {
-                    let membership = self.shadeMembership(target.recovery)
-                    guard membership == .current || (animation.allowSpaceSwitch && membership == .other) else {
-                        throw PeekError.message(L("目标窗口不在当前桌面或归属未知，保留标题条恢复记录。"))
-                    }
-                    try self.unhideOwnedApplication(target)
+                if target.recovery.hideStrategy == .appHide ||
+                   (target.recovery.hideStrategy == nil && binding.selectedEdge == .top && binding.effectiveTopHideMode(defaults:animation) == .appHide) {
+                    mutated = true
+                    snapshot = try self.setApplicationVisibility(target,binding:binding,show:show,frontPID:frontPID,
+                        settings:animation,screens:screens.map { $0.0 },epoch:currentEpoch,source:source)
+                    message = snapshot?.hidden == true ? L("应用已隐藏，可从顶部唤回"):L("应用已显示")
+                    success = true
+                } else {
+                guard !(try self.application(target.recovery)).isHidden else {
+                    throw PeekError.message(L("应用由你隐藏；请先从 Dock 显示应用。"))
                 }
                 guard (axRead(target.element,"AXFullScreen") as? Bool) != true else { throw PeekError.message(L("请先退出目标窗口的全屏模式，再使用收放。")) }
                 let onScreen = onScreenWindows().contains { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == target.number }
@@ -700,9 +654,7 @@ final class WindowController {
                     target.hidden = false; target.recovery.hideStrategy = nil; target.recovery.originalMinimized = nil
                     self.records.removeValue(forKey:binding.id); try self.persist()
                 }
-                try self.synchronizeCompression(target,start)
-                // A window we cannot see is not an error: it may be tucked off the
-                // edge, hidden by its app, or parked on another Space. Recall it.
+                // A window may be tucked beyond an edge or on another Space.
                 if !onScreen || target.hidden {
                     target.hidden = true; target.hasShown = false
                     if let saved = self.records[binding.id],saved.pid == target.recovery.pid,
@@ -712,7 +664,7 @@ final class WindowController {
                 }
                 // Other apps and macOS tiling can reveal a window while our state says hidden.
                 // Trust its actual on-screen geometry before deciding or saving a layout.
-                if target.hidden, target.recovery.applicationHidden != true,target.recovery.hideStrategy != .minimize,target.recovery.hideStrategy != .compression,
+                if target.hidden, target.recovery.applicationHidden != true,target.recovery.hideStrategy != .minimize,
                    target.tuckedOrigin.map({ near(start.origin,$0) }) != true, screens.contains(where: { screen in
                     let area = screen.0.intersection(start)
                     return !area.isNull && area.width * area.height > start.width * start.height * 0.5
@@ -742,15 +694,11 @@ final class WindowController {
                 // A visible window belongs to the user: remember their latest layout.
                 if !target.hidden {
                     let old = target.recovery
-                    target.recovery = WindowRecovery(bindingID:old.bindingID,pid:old.pid,launch:old.launch,bundle:old.bundle,title:old.title,original:start,windowNumber:target.number)
+                    target.recovery = WindowRecovery(bindingID:old.bindingID,pid:old.pid,launch:old.launch,bundle:old.bundle,title:old.title,original:start,processStart:old.processStart ?? ProcessStart.read(old.pid),windowNumber:target.number)
                 }
-                // Titlebar experiments remain available for old recovery records,
-                // but every new top hide uses single-window minimization.
+                // App hiding is handled separately before reading hidden AX geometry.
                 let topStrategy: WindowHideStrategy = .minimize
                 let strategy: WindowHideStrategy = target.recovery.hideStrategy ?? (binding.selectedEdge == .top ? topStrategy:.edgeMove)
-                if hide,strategy == .compression,self.unsupportedCompression.contains(target.number) {
-                    throw PeekError.message(L("这个窗口无法压成细条；请使用左右收起或自行选择最小化。"))
-                }
                 if hide && binding.selectedEdge == .top && !animation.topEnabled {
                     throw PeekError.message(L("顶部收放已关闭。请在“通用”开启，或选择底部、左侧、右侧。"))
                 }
@@ -770,10 +718,7 @@ final class WindowController {
                     repeat {
                         try self.respectUserInteraction()
                         let now = ProcessInfo.processInfo.systemUptime,newEpoch = self.spaceEpoch()
-                        // A parked window is intentionally outside every display.
-                        // Its confirmed Space assignment, rather than visibility,
-                        // permits restoring its position after activation switches.
-                        let visible = target.recovery.hideStrategy == .parked || onScreenWindows().contains{($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == target.number}
+                        let visible = onScreenWindows().contains{($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == target.number}
                         if newEpoch != currentEpoch,newEpoch == observedEpoch,visible,WindowSpaces.membership(target.number) == .current {
                             if stableSince == nil { stableSince = now }
                             if now-stableSince! >= 0.15 { break }
@@ -794,38 +739,10 @@ final class WindowController {
                     throw PeekError.message(L("桌面状态已改变，已停止收放。"))
                 }
                 target.recovery.hideStrategy = strategy
-                if hide && strategy == .shade {
-                    target.recovery.shadeFrame = CGRect(origin:shown,size:stableSize)
-                    target.recovery.shadeSpaceIDs = WindowSpaces.assignedSpaceIDs(target.number).map { Array($0) }
-                }
-                if strategy == .compression { target.recovery.compressedFrame = start; target.recovery.compressionInProgress = true }
                 if hide && strategy == .minimize { target.recovery.originalMinimized = false }
                 self.records[binding.id] = target.recovery; try self.persist() // Before any movement.
                 mutated = true; target.generation += 1
-                if strategy == .shade || strategy == .parked || strategy == .appHide {
-                    if hide {
-                        try self.hideShade(target,screens:screens.map { $0.0 },epoch:currentEpoch)
-                    } else {
-                        try self.revealShade(target,shown:shown,focusPrepared:focusPrepared)
-                    }
-                    target.hidden = hide; target.hasShown = !hide
-                    let full = CGRect(origin:shown,size:stableSize)
-                    snapshot = HoverWindow(id:binding.id,edge:.top,screen:screen.0,frame:full,hidden:hide,
-                        manualHide:hide && source == "hotkey",pid:target.recovery.pid,
-                        compressedFrame:hide ? CGRect(x:full.minX,y:full.minY,width:full.width,height:24):nil,
-                        shadeTitle:hide ? binding.name:nil)
-                    message = hide ? L("窗口已收为标题条，悬停或点击恢复"):L("窗口已展开")
-                    output("window_toggle",["success":true,"bundle":binding.bundleID,"hidden":hide,"backend":target.recovery.hideStrategy?.rawValue ?? "shade"])
-                    success = true
-                } else if strategy == .compression {
-                    let duration = reduceMotion ? 0:(hide ? animation.hideDuration:animation.showDuration)
-                    let actual = try self.compress(target,hide:hide,shown:shown,duration:duration,epoch:currentEpoch,focusPrepared:focusPrepared)
-                    target.hidden = hide; target.hasShown = !hide; target.tuckedOrigin = nil
-                    snapshot = HoverWindow(id:binding.id,edge:binding.selectedEdge,screen:screen.0,frame:actual,hidden:hide,manualHide:hide && source == "hotkey",pid:target.recovery.pid,compressedFrame:hide ? actual:nil)
-                    message = hide ? L("窗口已压至 {0}pt，悬停或快捷键恢复原高度",Int(actual.height.rounded())):L("窗口已恢复原高度")
-                    output("window_toggle",["success":true,"bundle":binding.bundleID,"edge":"top","hidden":hide,"backend":"compression","animation_mode":"windowResize","height":actual.height,"original_height":stableSize.height,"animation_ms":duration*1000,"source":source])
-                    success = true
-                } else if strategy == .minimize {
+                if strategy == .minimize {
                     let began = ProcessInfo.processInfo.systemUptime
                     if hide {
                         try self.setMinimized(true,target)
@@ -941,34 +858,22 @@ final class WindowController {
                 output("window_toggle",["success":true,"bundle":binding.bundleID,"edge":binding.selectedEdge.rawValue,"hidden":hide,"x":final.minX,"y":final.minY,"width":final.width,"height":final.height,"source":source,"animation_ms":duration*1000,"duration_ms":(ProcessInfo.processInfo.systemUptime-began)*1000])
                 success = true
                 }
+                }
                 // A visible window no longer needs crash recovery. Keeping its old
                 // frame would undo later user positioning on the next app launch.
                 if snapshot?.hidden == false {
                     if let target = self.windows[binding.id] {
                         target.recovery.hideStrategy = nil; target.recovery.originalMinimized = nil
-                        target.recovery.applicationHidden = nil; target.recovery.parkedFrame = nil
+                        target.recovery.applicationHidden = nil; target.recovery.hiddenSpaceIDs = nil; target.recovery.parkedFrame = nil
                         target.recovery.compressedFrame = nil; target.recovery.compressionInProgress = nil
                     }
                     self.records.removeValue(forKey:binding.id); try self.persist()
                 }
             } catch WindowInterruption.userInteraction {
-                // A partial compression still owns the original height. Do not
-                // mistake its visible pixels for a fully expanded/user-sized window.
-                if let target = self.windows[binding.id],target.recovery.hideStrategy == .parked || target.recovery.hideStrategy == .appHide {
+                // Keep the hidden application reachable after an interrupted request.
+                if let target = self.windows[binding.id],target.recovery.hideStrategy == .appHide {
                     target.hidden = true
-                    snapshot = self.shadeSnapshot(target,binding:binding,screens:screens.map { $0.0 },allowOtherSpaces:animation.allowSpaceSwitch)
-                } else if let target = self.windows[binding.id],target.recovery.hideStrategy == .compression,let actual = axFrame(target.element) {
-                    target.hidden = !self.sameSize(actual.size,target.recovery.original.size); target.hasShown = !target.hidden
-                    target.recovery.compressionInProgress = false
-                    if target.hidden { self.records[binding.id] = target.recovery }
-                    else { target.recovery.hideStrategy = nil; self.records.removeValue(forKey:binding.id) }
-                    try? self.persist()
-                    if let screen = screens.max(by:{ a,b in
-                        let aa = a.0.intersection(actual),bb = b.0.intersection(actual)
-                        return (aa.isNull ? 0:aa.width*aa.height) < (bb.isNull ? 0:bb.width*bb.height)
-                    }) {
-                        snapshot = HoverWindow(id:binding.id,edge:binding.selectedEdge,screen:screen.0,frame:actual,hidden:target.hidden,pid:target.recovery.pid,compressedFrame:target.hidden ? actual:nil)
-                    }
+                    snapshot = self.applicationSnapshot(target,binding:binding,screens:screens.map { $0.0 },allowOtherSpaces:animation.allowSpaceSwitch)
                 } else if let target = self.windows[binding.id],let actual = axFrame(target.element),
                    target.recovery.hideStrategy != .minimize || (axRead(target.element,kAXMinimizedAttribute) as? Bool) != nil {
                     target.generation += 1
@@ -993,22 +898,20 @@ final class WindowController {
                 output("window_yielded_to_user",["binding":binding.id.uuidString,"source":source])
             } catch {
                 success = false; message = error.localizedDescription
-                if mutated,let target = self.windows[binding.id],target.recovery.hideStrategy == .compression {
-                    target.hidden = true; target.hasShown = false // Preserve partial geometry even after a Space change.
-                }
                 if mutated,!self.interactionProvider(),mutationEpoch == self.spaceEpoch(),let target = self.windows[binding.id],self.records[binding.id] != nil {
                     target.hidden = true
                     if self.restore(target) {
                         // Keep the exact handle even if it closed mid-animation;
                         // discovery must not silently select a sibling window.
                         target.hidden = false; target.hasShown = false; target.recovery.hideStrategy = nil
+                        target.recovery.applicationHidden = nil; target.recovery.hiddenSpaceIDs = nil
                         target.recovery.compressedFrame = nil; target.recovery.compressionInProgress = nil
                         self.records.removeValue(forKey:binding.id); try? self.persist()
                     }
                     else { message = L("{0} 恢复尚未完成，请稍后再按快捷键重试。",message) }
                 }
                 if let target = self.windows[binding.id],target.hidden {
-                    snapshot = self.shadeSnapshot(target,binding:binding,screens:screens.map { $0.0 },allowOtherSpaces:animation.allowSpaceSwitch)
+                    snapshot = self.applicationSnapshot(target,binding:binding,screens:screens.map { $0.0 },allowOtherSpaces:animation.allowSpaceSwitch)
                 }
                 output("window_toggle",["success":false,"bundle":binding.bundleID,"message":message])
             }
@@ -1027,10 +930,10 @@ final class WindowController {
         }
     }
     private func restore(_ target: ManagedWindow,allowSpaceSwitch: Bool = false) -> Bool {
-        guard alive(target.recovery) else { return true }
+        guard alive(target.recovery) else { return processIdentity(target.recovery) == .gone }
         if compressionAlreadyRestored(target.recovery) { return true }
         if target.recovery.hideStrategy == .appHide || target.recovery.hideStrategy == .parked || target.recovery.hideStrategy == .shade {
-            return restoreShade(target)
+            return restoreLegacyOrHiddenApplication(target)
         }
         if axWindowNumber(target.element) != target.number || axFrame(target.element) == nil,
            let refreshed = recoveredElement(target.recovery) { target.element = refreshed }
@@ -1094,6 +997,8 @@ final class WindowController {
         }
     }
     private func restoreRecord(_ id: UUID,allowSpaceSwitch: Bool = false) -> Bool {
+        // A transient read failure must never discard our ownership journal.
+        if let record = records[id],processIdentity(record) == .unknown { return false }
         if let record = records[id],compressionAlreadyRestored(record) {
             output("recovery_original_frame_confirmed",["binding":id.uuidString])
         } else if let managed = windows[id] {
@@ -1103,7 +1008,7 @@ final class WindowController {
                 output("recovery_identity_missing",["binding":id.uuidString]); return false
             }
             if record.hideStrategy == .appHide {
-                guard alive(record),shadeMembership(record) == .current,
+                guard alive(record),applicationMembership(record) == .current,
                       let app = NSRunningApplication(processIdentifier:record.pid) else { return false }
                 if app.isHidden {
                     guard record.applicationHidden == true else { return false }

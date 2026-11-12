@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")"
-version=1.4.8
-build_number=48
+version=1.4.12
+build_number=52
 if [ "${RELEASE_TAG:-v$version}" != "v$version" ]; then
     echo "Release tag must match the app version: v$version" >&2
     exit 1
@@ -19,11 +19,11 @@ for arch in arm64 x86_64; do
     cp Resources/MenuBarIcon-64.png "$app/Contents/Resources/MenuBarIcon-64.png"
     cp Resources/AppIcon.icns "$app/Contents/Resources/PeekIcon.icns"
     xcrun swiftc -O -sdk "$sdk" -target "$arch-apple-macos13.0" \
-        main.swift Localization.swift MainWindow.swift AppBinding.swift GlobalShortcutManager.swift WindowController.swift WindowSpaces.swift ShadeBar.swift HoverController.swift PeekMark.swift \
+        main.swift ApplicationRecallMemory.swift Localization.swift MainWindow.swift AppBinding.swift GlobalShortcutManager.swift WindowController.swift WindowSpaces.swift HoverController.swift PeekMark.swift \
         -o "$app/Contents/MacOS/Peek" -framework AppKit -framework ApplicationServices -framework Carbon -framework ServiceManagement
     test "$(xcrun lipo -archs "$app/Contents/MacOS/Peek")" = "$arch"
     cat > "$app/Contents/Info.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleExecutable</key><string>Peek</string><key>CFBundleIdentifier</key><string>dev.local.Peek</string><key>CFBundleName</key><string>Peek</string><key>CFBundleDisplayName</key><string>Peek</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleDevelopmentRegion</key><string>en</string><key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array><key>CFBundleVersion</key><string>$build_number</string><key>PeekAuthor</key><string>yinyu985</string><key>PeekAuthorURL</key><string>https://github.com/yinyu985</string><key>LSUIElement</key><false/><key>NSQuitAlwaysKeepsWindows</key><false/><key>CFBundleShortVersionString</key><string>$version</string><key>LSMinimumSystemVersion</key><string>13.0</string><key>CFBundleIconFile</key><string>PeekIcon</string><key>NSAccessibilityUsageDescription</key><string>控制用户绑定的单个窗口。</string></dict></plist>
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleExecutable</key><string>Peek</string><key>CFBundleIdentifier</key><string>dev.local.Peek</string><key>CFBundleName</key><string>Peek</string><key>CFBundleDisplayName</key><string>Peek</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleDevelopmentRegion</key><string>en</string><key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array><key>CFBundleVersion</key><string>$build_number</string><key>PeekAuthor</key><string>yinyu985</string><key>PeekAuthorURL</key><string>https://github.com/yinyu985</string><key>LSUIElement</key><false/><key>NSQuitAlwaysKeepsWindows</key><false/><key>CFBundleShortVersionString</key><string>$version</string><key>LSMinimumSystemVersion</key><string>13.0</string><key>CFBundleIconFile</key><string>PeekIcon</string><key>NSAccessibilityUsageDescription</key><string>控制绑定窗口；选择隐藏整个应用时隐藏该应用的所有窗口。</string></dict></plist>
 PLIST
     codesign --force --sign - --identifier dev.local.Peek --requirements '=designated => identifier "dev.local.Peek"' "$app"
     codesign --verify --strict "$app"

@@ -1,1 +1,1 @@
-"NSAccessibilityUsageDescription" = "控制用户绑定的单个窗口。";
+"NSAccessibilityUsageDescription" = "控制绑定窗口；选择隐藏整个应用时隐藏该应用的所有窗口。";

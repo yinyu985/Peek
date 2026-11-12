@@ -15,7 +15,6 @@ final class Controller: NSObject,NSApplicationDelegate {
     let hotkeys = GlobalShortcutManager()
     let toggler = WindowController()
     let hover = HoverController()
-    let shadeBars = ShadeBarController()
     var hoverWindows: [UUID:HoverWindow] = [:]
     var hoverDiscoveryTimer: Timer?
     var mainWindow: MainWindowController!
@@ -42,19 +41,10 @@ final class Controller: NSObject,NSApplicationDelegate {
             guard let self,let binding = self.store.bindings.first(where:{$0.id == id}) else { return }
             self.toggler.setVisible(show,binding:binding)
         }
-        shadeBars.onReveal = { [weak self] id in
-            guard let self,let binding = self.store.bindings.first(where:{$0.id == id}) else { return }
-            // Mouse-up leaves PointerInteraction busy briefly. Queue the click
-            // after that interval; Hover still follows its configured dwell delay.
-            DispatchQueue.main.asyncAfter(deadline:.now()+0.22) { [weak self] in
-                guard let self,self.store.bindings.contains(where:{$0.id == id}) else { return }
-                self.toggler.setVisible(true,binding:binding)
-            }
-        }
         toggler.onWindowState = { [weak self] snapshot in
-            self?.hoverWindows[snapshot.id] = snapshot; self?.hover.update(snapshot); self?.shadeBars.update(snapshot)
+            self?.hoverWindows[snapshot.id] = snapshot; self?.hover.update(snapshot)
         }
-        toggler.onWindowRemoved = { [weak self] id in self?.hoverWindows.removeValue(forKey:id); self?.hover.remove(id); self?.shadeBars.remove(id) }
+        toggler.onWindowRemoved = { [weak self] id in self?.hoverWindows.removeValue(forKey:id); self?.hover.remove(id) }
         toggler.onBindingStatus = { [weak self] id,message,error in self?.mainWindow.setBindingStatus(id,message,error) }
         toggler.onPermissionNeeded = { [weak self] in self?.openWindow(); self?.mainWindow.showPermissionNeeded() }
         // Recovery is automatic, not a permanent control on the preferences page.
@@ -144,7 +134,7 @@ final class Controller: NSObject,NSApplicationDelegate {
     @objc func quit() { NSApp.terminate(nil) }
     func applicationShouldHandleReopen(_ sender: NSApplication,hasVisibleWindows flag: Bool) -> Bool { guard mainWindow != nil else { return true }; openWindow(); return true }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
-    func applicationWillTerminate(_ notification: Notification) { hotkeys.suspend(); shadeBars.removeAll(); output("app_quitting") }
+    func applicationWillTerminate(_ notification: Notification) { hotkeys.suspend(); output("app_quitting") }
 }
 signal(SIGPIPE,SIG_IGN)
 // Peek keeps running with no window, so macOS state restoration has nothing to

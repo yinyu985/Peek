@@ -465,13 +465,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             let info = NSButton(image:NSImage(systemSymbolName:"exclamationmark.circle",accessibilityDescription:topHelp ? L("顶部收放说明"):L("桌面切换说明"))!,target:self,action:topHelp ? #selector(showTopHelp(_:)):#selector(showSpaceHelp(_:)))
             info.isBordered = false; info.contentTintColor = Ink.mid
             info.setAccessibilityLabel(topHelp ? L("顶部收放说明"):L("桌面切换说明"))
-            info.toolTip = topHelp ? L("顶部只使用最小化。点击查看实验功能的限制和关闭后的行为。"):L("关闭：只在当前桌面收放。开启：允许激活窗口时切换到它所在的桌面，不搬动窗口的桌面归属。推荐把应用分配给所有桌面。")
+            info.toolTip = topHelp ? L("顶部可最小化窗口或隐藏整个应用。点击查看影响范围和动画说明。"):L("关闭：只在当前桌面收放。开启：允许激活窗口时切换到它所在的桌面，不搬动窗口的桌面归属。推荐把应用分配给所有桌面。")
             info.translatesAutoresizingMaskIntoConstraints = false; row.addSubview(info)
             NSLayoutConstraint.activate([info.trailingAnchor.constraint(equalTo:row.trailingAnchor),info.centerYAnchor.constraint(equalTo:row.centerYAnchor),info.widthAnchor.constraint(equalToConstant:18),info.heightAnchor.constraint(equalToConstant:22)])
         }
     }
     @objc private func showTopHelp(_ sender: NSButton) {
-        showHelp(L("macOS 和许多应用会限制窗口移出屏幕顶部。\n\n当前顶部收放只使用系统最小化：仅收起目标窗口，悬停顶部对应区段或按快捷键可恢复，移开鼠标后按离开延迟再次收起。\n\n关闭后，应用方向菜单不再提供“顶部”，已有顶部绑定暂停收起，已收起的窗口仍可召回。标题条方案暂时停用。"),from:sender)
+        showHelp(L("macOS 和许多应用会限制窗口移出屏幕顶部。\n\n最小化窗口：只收起绑定窗口。隐藏整个应用：同一应用的所有窗口一起隐藏，恢复时将绑定窗口置前，保留原位置和尺寸。\n\n两种方式都通过顶部对应区段或快捷键恢复，鼠标移开后按离开延迟收起。停留和离开延迟有效；过渡由 macOS 控制，不使用 Peek 的展开、收起时长。\n\n关闭后，方向菜单移除“顶部”，已有顶部绑定暂停收起，已收起的窗口仍可召回。"),from:sender)
+    }
+    @objc private func showTopModeHelp(_ sender: NSButton) {
+        showHelp(L("隐藏整个应用会同时隐藏该应用的所有窗口。\n\n如果应用有多个窗口，例如浏览器或 Finder，建议使用“最小化窗口”，只收起绑定窗口。\n\n这里设置通用默认方式。在“应用”的方向菜单中，可为每个应用选择“↑ 最小化”或“↑ 隐藏应用”；选择“↑ 顶部”则使用通用默认。"),from:sender)
     }
     @objc private func showSpaceHelp(_ sender: NSButton) {
         showHelp(L("关闭：只在当前桌面收放。\n\n开启：Hover 或快捷键可能切走当前桌面，转到窗口所在的桌面。不会把窗口搬到当前桌面；能否切换由 macOS 决定。\n\n推荐：Dock 中右键目标应用 → 选项 → 分配给 → 所有桌面。"),from:sender)
@@ -514,7 +517,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             field.isEnabled = enabled
             field.target = self; field.action = #selector(numericFieldChanged(_:)); field.cell?.sendsActionOnEndEditing = true
             field.setAccessibilityLabel(title+"，\(setting.unit)")
-            field.toolTip = setting == .revealWidth ? L("0–100 逻辑像素（macOS pt）；0 保留最小边缘。左、右、底部共用，下次收起时生效。底部可能受系统最小标题栏限制。"):L("0–{0} 秒；步进 {1} 秒",Int(setting.limit),setting.step)
+            field.toolTip = setting == .revealWidth ? L("0–100 逻辑像素（macOS pt）；0 保留最小边缘。左、右、底部共用，下次收起时生效。底部可能受系统最小标题栏限制。"):(setting.isDelay ? L("0–{0} 秒；步进 {1} 秒",Int(setting.limit),setting.step):L("仅控制左、右、底部的移动动画；顶部最小化和隐藏应用的过渡由 macOS 控制。"))
             field.translatesAutoresizingMaskIntoConstraints = false
             box.addSubview(field)
             NSLayoutConstraint.activate([
@@ -561,11 +564,27 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         addSwitchRow(L("在菜单栏显示图标"),isOn:store.menuBarIconVisible,action:#selector(menuBarIconChanged(_:)),to:generalRows)
         addSwitchRow(L("顶部收放（实验）"),isOn:store.hoverSettings.topEnabled,action:#selector(topEnabledChanged(_:)),to:generalRows,topHelp:true)
         let caption = label(L("顶部收起方式"),13); caption.textColor = Ink.mid
-        let mode = label(L("最小化"),12); mode.textColor = store.hoverSettings.topEnabled ? Ink.mid:Ink.low
-        mode.setAccessibilityLabel(L("顶部收起方式：最小化"))
+        let mode = DropdownButton(store.hoverSettings.topHideMode.title,action:{})
+        mode.isChip = true; mode.isEnabled = store.hoverSettings.topEnabled
+        mode.setAccessibilityLabel(L("顶部收起方式"))
+        mode.actionBlock = { [weak self,weak mode] in
+            guard let self,let mode else { return }
+            self.showPicker(TopHideMode.allCases.map(\.title),selected:TopHideMode.allCases.firstIndex(of:self.store.hoverSettings.topHideMode) ?? 0,from:mode,label:L("顶部收起方式")) { [weak self] index in
+                guard let self else { return }
+                do { try self.store.configureHover(topHideMode:TopHideMode.allCases[index]); self.onBindingsChanged?() }
+                catch { self.setStatus(error.localizedDescription) }
+                self.reloadGeneral()
+            }
+        }
         let modeRow = NSStackView(views:[caption,NSView(),mode]); modeRow.orientation = .horizontal; modeRow.alignment = .centerY
         modeRow.edgeInsets = NSEdgeInsets(top:0,left:0,bottom:0,right:24); generalRows.addArrangedSubview(modeRow)
-        NSLayoutConstraint.activate([modeRow.widthAnchor.constraint(equalTo:generalRows.widthAnchor),modeRow.heightAnchor.constraint(equalToConstant:Layout.rowHeight)])
+        NSLayoutConstraint.activate([modeRow.widthAnchor.constraint(equalTo:generalRows.widthAnchor),modeRow.heightAnchor.constraint(equalToConstant:Layout.rowHeight),mode.widthAnchor.constraint(equalToConstant:156),mode.heightAnchor.constraint(equalToConstant:28)])
+        let modeInfo = NSButton(image:NSImage(systemSymbolName:"exclamationmark.circle",accessibilityDescription:L("顶部收起方式说明"))!,target:self,action:#selector(showTopModeHelp(_:)))
+        modeInfo.isBordered = false; modeInfo.contentTintColor = Ink.mid
+        modeInfo.setAccessibilityLabel(L("顶部收起方式说明"))
+        modeInfo.toolTip = L("多窗口应用建议使用最小化；隐藏应用会同时隐藏它的所有窗口。")
+        modeInfo.translatesAutoresizingMaskIntoConstraints = false; modeRow.addSubview(modeInfo)
+        NSLayoutConstraint.activate([modeInfo.trailingAnchor.constraint(equalTo:modeRow.trailingAnchor),modeInfo.centerYAnchor.constraint(equalTo:modeRow.centerYAnchor),modeInfo.widthAnchor.constraint(equalToConstant:18),modeInfo.heightAnchor.constraint(equalToConstant:22)])
         addSwitchRow(L("允许切换桌面"),isOn:store.hoverSettings.allowSpaceSwitch,action:#selector(spaceSwitchChanged(_:)),to:generalRows,spaceHelp:true)
         if state == .requiresApproval {
             let hint = label(L("请在系统设置的登录项中允许 Peek。"),11); hint.textColor = .secondaryLabelColor; generalRows.addArrangedSubview(hint)
@@ -647,13 +666,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             remove.setAccessibilityLabel(L("删除 {0}",binding.name)); remove.toolTip = L("删除绑定")
             remove.widthAnchor.constraint(equalToConstant:24).isActive = true
             let inactiveTop = binding.selectedEdge == .top && !store.hoverSettings.topEnabled
-            let direction = DropdownButton(inactiveTop ? L("已停用"):binding.selectedEdge.title,action:{})
+            let direction = DropdownButton(inactiveTop ? L("已停用"):binding.directionTitle,action:{})
             directionButtons[binding.id] = direction
             direction.toolTip = bindingStatus[binding.id].map { L("上次操作：")+$0.0 }
             direction.hasError = false
             direction.setAccessibilityHelp(bindingStatus[binding.id]?.0)
-            direction.isChip = true; direction.widthAnchor.constraint(equalToConstant:86).isActive = true
-            direction.setAccessibilityLabel(L("收起方向：")+binding.selectedEdge.title)
+            direction.isChip = true; direction.widthAnchor.constraint(equalToConstant:110).isActive = true
+            direction.setAccessibilityLabel(L("收起方向：")+binding.directionTitle)
             direction.actionBlock = { [weak self,weak direction] in if let direction { self?.showDirections(binding,from:direction) } }
             for control in [shortcut,remove,direction] {
                 control.translatesAutoresizingMaskIntoConstraints = false; control.heightAnchor.constraint(equalToConstant:28).isActive = true
@@ -751,11 +770,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         showHelp(message,from:sender)
     }
     func showDirections(_ binding: AppBinding,from anchor: NSView) {
-        let edges = WindowEdge.available(topEnabled:store.hoverSettings.topEnabled)
-        showPicker(edges.map(\.title),selected:edges.firstIndex(of:binding.selectedEdge) ?? -1,from:anchor,label:L("收起方向")) { [weak self] index in
-            self?.setEdge(binding.id,edges[index])
+        var options: [(WindowEdge,TopHideMode?)] = []
+        if store.hoverSettings.topEnabled { options = [(.top,nil),(.top,.minimize),(.top,.appHide)] }
+        options += [(.bottom,nil),(.left,nil),(.right,nil)]
+        let titles = options.map { edge,mode in mode?.directionTitle ?? edge.title }
+        let selected = options.firstIndex { edge,mode in
+            edge == binding.selectedEdge && (edge != .top || mode == binding.topHideMode)
+        } ?? -1
+        showPicker(titles,selected:selected,from:anchor,label:L("收起方向")) { [weak self] index in
+            let (edge,mode) = options[index]
+            self?.setEdge(binding.id,edge,topHideMode:mode)
         }
     }
+
     private func showPicker(_ titles: [String],selected: Int,from anchor: NSView,label: String,onSelect: @escaping (Int)->Void) {
         stopRecording()
         if selectionPanel != nil,pickerAnchor === anchor { closeSelection(); return }
@@ -820,13 +847,20 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         closeSelection()
         selection?(sender.tag)
     }
-    private func setEdge(_ id: UUID,_ edge: WindowEdge) {
-        guard edge != .top || store.hoverSettings.topEnabled else { return }
-        prepare(id) { [weak self] in
+    private func setEdge(_ id: UUID,_ edge: WindowEdge,topHideMode: TopHideMode? = nil) {
+        guard edge != .top || store.hoverSettings.topEnabled,
+              let current = store.bindings.first(where:{$0.id == id}) else { return }
+        let save = { [weak self] in
             guard let self else { return }
-            do { try self.store.configure(id,edge:edge,windowTitle:nil,changeWindow:true); self.bindingStatus.removeValue(forKey:id); self.reload() }
-            catch { self.setStatus(error.localizedDescription) }
+            do {
+                try self.store.configure(id,edge:edge,windowTitle:nil,changeWindow:edge != current.selectedEdge,
+                    topHideMode:topHideMode,changeTopHideMode:edge == .top)
+                self.bindingStatus.removeValue(forKey:id); self.reload()
+            } catch { self.setStatus(error.localizedDescription) }
         }
+        // A method-only change applies on the next hide; the existing journal
+        // still controls how an already-hidden window is restored.
+        if edge == current.selectedEdge { save() } else { prepare(id,action:save) }
     }
     func showPermissionNeeded() { permissionButton.isHidden = false; showApps() }
     private func openAccessibility() {

@@ -13,7 +13,7 @@ Peek is a lightweight window utility for macOS. Assign an application a shortcut
 - **Keep a visible strip**: choose 0–100 logical pixels for the left, right, and bottom edges. The default is 8.
 - **Keep window sizes**: restored windows align with the selected edge. Peek respects subsequent dragging and resizing.
 - **Set your own timing**: adjust delays and movement durations, or turn off automatic behavior and use shortcuts alone.
-- **Top edge (experimental)**: minimize an individual window and hover over its top edge segment to restore it.
+- **Top edge (experimental)**: minimize one window or hide the entire application, then hover over its top edge segment to restore it.
 - **Optional desktop switching**: recalling a window can switch to its desktop by default. Turn this off to act only on the current desktop.
 
 ## Interface
@@ -30,7 +30,7 @@ General contains language, launch at login, menu bar visibility, top edge hiding
 
 <img src="docs/images/general.png" width="600" alt="Peek General page: language, launch at login, menu bar icon, top edge hiding, and desktop switching">
 
-*Images show the current Chinese interface. The application list is an example configuration. Choose English in General → Language to use the English interface.*
+*Images show the current Chinese interface. The images use example settings; General shows the enabled top-edge hiding option. Choose English in General → Language to use the English interface.*
 
 ## Installation
 
@@ -77,9 +77,16 @@ Follow Peek's prompt to **System Settings → Privacy & Security → Accessibili
 
 ### Top edge (experimental)
 
-Enable **Top edge (experimental)** in General to make Top available in application direction menus. It currently uses system minimization for the target window only. Hover over the window's top edge segment or press its shortcut to restore it. Moving away hides it after the hide delay. The system Dock transition does not use Peek's animation duration settings.
+Enable **Top edge (experimental)** in General to make Top available in application direction menus. Choose one of two modes:
 
-Turning it off removes Top from direction menus. Existing top bindings show Disabled and can be changed to another direction. Windows already hidden by Peek can still be restored. Peek does not automatically restore windows you minimized yourself. Click the exclamation mark beside the switch for details.
+- **Minimize window (default)**: minimize only the bound window.
+- **Hide application**: hide all windows of that application together. Restoring brings the bound window forward and preserves its position and size.
+
+**Use Minimize window for applications with multiple windows, such as browsers or Finder.** Click the information icon beside the method in General for details. In Apps, choose ↑ Minimize or ↑ Hide app for each application; ↑ Top follows the general default.
+
+Hover over the screen's top edge segment corresponding to the original window width, or press its shortcut to restore it. Leaving the window and the path from the top edge hides it after the hide delay. Moving through the menu bar into the window keeps it open. No separate title bar is needed. Peek remembers each application’s successful recall method and uses it directly next time, including after a restart. WeChat uses the system reopen request directly. Show and hide delays apply to both modes; macOS controls the transitions, so Peek's show and hide durations do not apply. Changing modes restores an already hidden window using its previous mode, then uses the new mode on the next hide.
+
+Turning it off removes Top from direction menus. Existing top bindings show Disabled and can be changed to another direction. Windows already hidden by Peek can still be restored. Peek does not automatically restore windows you minimized or applications you hid yourself. Click the exclamation mark beside the switch for details.
 
 The red exclamation mark at the far right of an application row explains failed operations, disabled directions, or window position limits.
 

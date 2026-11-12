@@ -19,8 +19,6 @@ struct HoverWindow {
     var manualHide: Bool = false
     var pid: pid_t? = nil
     var revealWidth: CGFloat = 0
-    var compressedFrame: CGRect? = nil
-    var shadeTitle: String? = nil
     var onCurrentSpace = true
     var observedAt = ProcessInfo.processInfo.systemUptime
     // Use the window's segment, not the whole display edge. Half-open spans
@@ -28,8 +26,6 @@ struct HoverWindow {
     func containsTrigger(_ pointer: CGPoint) -> Bool {
         guard pointer.x >= screen.minX,pointer.x < screen.maxX,
               pointer.y >= screen.minY,pointer.y < screen.maxY else { return false }
-        if hidden,onCurrentSpace,edge == .top,let strip = compressedFrame,
-           pointer.x >= strip.minX,pointer.x < strip.maxX,pointer.y >= strip.minY,pointer.y < strip.maxY { return true }
         switch edge {
         case .left,.right:
             guard pointer.y >= max(frame.minY,screen.minY),pointer.y < min(frame.maxY,screen.maxY) else { return false }
@@ -39,6 +35,15 @@ struct HoverWindow {
             guard pointer.x >= max(frame.minX,screen.minX),pointer.x < min(frame.maxX,screen.maxX) else { return false }
             return edge == .top ? pointer.y < screen.minY+3:pointer.y >= screen.maxY-max(3,revealWidth)
         }
+    }
+    // The menu bar (or any gap above an unaligned window) is the route from
+    // the top trigger into the window, not an exit from the revealed window.
+    // This extends only the keep-open area, never the activation trigger.
+    func containsOpenArea(_ pointer: CGPoint) -> Bool {
+        if frame.insetBy(dx:-2,dy:-2).contains(pointer) { return true }
+        guard edge == .top,pointer.x >= max(screen.minX,frame.minX)-2,
+              pointer.x < min(screen.maxX,frame.maxX)+2 else { return false }
+        return pointer.y >= screen.minY && pointer.y <= frame.minY+2
     }
 }
 // Pure timing model. Hover sends explicit show/hide intent, never a toggle.
@@ -59,7 +64,7 @@ struct HoverTracker {
             if now-edgeSince! >= showDelay { fired = true; return true }
         } else {
             if atEdge { outsideSince = nil; return nil }
-            if window.frame.insetBy(dx:-2,dy:-2).contains(pointer) { entered = true; outsideSince = nil; fired = false }
+            if window.containsOpenArea(pointer) { entered = true; outsideSince = nil; fired = false }
             else if entered && !fired {
                 if outsideSince == nil { outsideSince = now }
                 if now-outsideSince! >= hideDelay { fired = true; return false }
@@ -114,7 +119,7 @@ final class HoverController {
            awaitingGeometry.remove(window.id) != nil {
             var tracker = HoverTracker(); tracker.update(hidden:window.hidden)
             tracker.entered = hoverRevealed
-            tracker.rearm = window.hidden && window.compressedFrame != nil && window.containsTrigger(mouseInAX())
+            tracker.rearm = window.hidden && window.containsTrigger(mouseInAX())
             trackers[window.id] = tracker
             updateTimer(); return
         }
@@ -197,6 +202,11 @@ final class HoverController {
             }
         }
         // Finish sampling before callbacks can change focus or window state.
-        for (id,intent) in intents { output("hover_intent",["binding":id.uuidString,"show":intent]); onIntent?(id,intent) }
+        for (id,intent) in intents {
+            let frame = windows[id]?.frame ?? .zero
+            output("hover_intent",["binding":id.uuidString,"show":intent,"mouse_x":pointer.x,"mouse_y":pointer.y,
+                "frame_x":frame.minX,"frame_y":frame.minY,"frame_width":frame.width,"frame_height":frame.height])
+            onIntent?(id,intent)
+        }
     }
 }
