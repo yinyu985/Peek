@@ -33,6 +33,30 @@ enum PeekMark {
         }
         return nil
     }
+    // Use the original large PNG for the sidebar. Extract its existing mark;
+    // the pale icon plate is masked out, with no redrawing of the artwork.
+    static func sidebarImage(size: NSSize) -> NSImage {
+        guard let url = resourceURL("AppIcon-1024","png"),let source = NSImage(contentsOf:url),
+              let cgImage = source.cgImage(forProposedRect:nil,context:nil,hints:nil),
+              let mark = cgImage.cropping(to:CGRect(x:128,y:192,width:800,height:640)),
+              let rgb = CGContext(data:nil,width:mark.width,height:mark.height,bitsPerComponent:8,bytesPerRow:0,
+                                  space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.noneSkipLast.rawValue) else {
+            return image(size:size)
+        }
+        let rect = CGRect(x:0,y:0,width:mark.width,height:mark.height)
+        rgb.draw(mark,in:rect)
+        guard let masked = rgb.makeImage()?.copy(maskingColorComponents:[190,255,190,255,190,255]),
+              let rgba = CGContext(data:nil,width:mark.width,height:mark.height,bitsPerComponent:8,bytesPerRow:0,
+                                   space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return image(size:size)
+        }
+        rgba.draw(masked,in:rect)
+        guard let transparent = rgba.makeImage() else { return image(size:size) }
+        let scale = min(size.width/CGFloat(mark.width),size.height/CGFloat(mark.height))
+        let result = NSImage(cgImage:transparent,size:NSSize(width:CGFloat(mark.width)*scale,height:CGFloat(mark.height)*scale))
+        result.isTemplate = true; result.accessibilityDescription = "Peek"
+        return result
+    }
     static func image(size: NSSize = NSSize(width:27,height:20),template: Bool = true) -> NSImage {
         if let url = resourceURL("MenuBarIcon-64","png"),let image = NSImage(contentsOf:url) {
             image.size = size

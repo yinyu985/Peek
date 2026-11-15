@@ -22,10 +22,42 @@ private enum Ink {
     static let mid = NSColor(srgbRed:0.92,green:0.947,blue:1,alpha:0.62)
     static let low = NSColor(srgbRed:0.92,green:0.947,blue:1,alpha:0.34)
 }
+private func drawKeyboardFocus(_ control: NSControl) {
+    guard control.isEnabled, control.window?.isKeyWindow == true,
+          control.window?.firstResponder === control else { return }
+    let ring = NSBezierPath(roundedRect:control.bounds.insetBy(dx:1.5,dy:1.5),xRadius:5,yRadius:5)
+    Ink.accent.setStroke(); ring.lineWidth = 2; ring.stroke()
+}
+private final class NumericTextField: NSTextField {
+    override func becomeFirstResponder() -> Bool {
+        let result = super.becomeFirstResponder(); superview?.needsDisplay = true; return result
+    }
+    override func textDidEndEditing(_ notification: Notification) {
+        super.textDidEndEditing(notification); superview?.needsDisplay = true
+    }
+}
 private enum Layout {
     static let rowHeight: CGFloat = 30
     static let rowSpacing: CGFloat = 2
     static let cardInset: CGFloat = 8
+    static let pageInset: CGFloat = 12
+    static let headerHeight: CGFloat = 28
+}
+// These columns fill a 428pt card, including its 10pt side insets.
+// Keep slots even when their content is empty or hidden.
+private enum ApplicationRowLayout {
+    static let widths: [CGFloat] = [24,160,72,96,14,14]
+    static let gaps: [CGFloat] = [8,6,6,4,4]
+    static let inset: CGFloat = 10
+    static let trailingInset: CGFloat = 10
+}
+// AppKit's default text/button alignment insets otherwise extend their frames
+// beyond the declared column widths.
+private final class ApplicationNameField: NSTextField {
+    override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsets(top:0,left:0,bottom:0,right:0) }
+}
+private final class ApplicationStatusButton: NSButton {
+    override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsets(top:0,left:0,bottom:0,right:0) }
 }
 private final class WindowSurface: NSView {
     override var isOpaque: Bool { true }
@@ -53,17 +85,39 @@ private final class GlassCard: NSView {
 private final class TopAlignedStack: NSStackView {
     override var isFlipped: Bool { true }
 }
+// Button captions and menu items share the same text and indicator columns.
+private enum PickerLayout {
+    static let rowHeight: CGFloat = 28
+    static let padding: CGFloat = 3
+    static let inset: CGFloat = 6
+    static let indicatorWidth: CGFloat = 6
+    static let indicatorGap: CGFloat = 4
+    static func font(in bounds: NSRect) -> NSFont { .systemFont(ofSize:bounds.width <= 74 ? 11:12) }
+    static func textRect(in bounds: NSRect) -> NSRect {
+        let height = ("Ag" as NSString).size(withAttributes:[.font:font(in:bounds)]).height
+        return NSRect(x:bounds.minX+inset,y:bounds.midY-height/2,
+                      width:bounds.width-inset*2-indicatorWidth-indicatorGap,height:height)
+    }
+    static func indicatorRect(in bounds: NSRect) -> NSRect {
+        NSRect(x:bounds.maxX-inset-indicatorWidth,y:bounds.midY-3,width:indicatorWidth,height:6)
+    }
+    static func drawTitle(_ title: String,in bounds: NSRect,color: NSColor) {
+        let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byTruncatingTail
+        (title as NSString).draw(in:textRect(in:bounds),withAttributes:[.font:font(in:bounds),.foregroundColor:color,.paragraphStyle:paragraph])
+    }
+}
 // Actions, the direction picker and directory links share one text-only style.
 // NSButton still supplies keyboard activation and accessibility, but never a bezel.
 private class ActionButton: NSButton {
     override var isOpaque: Bool { false }
     override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsets(top:0,left:0,bottom:0,right:0) }
     var showsDisclosure: Bool { false }
-    var disclosureExpanded = false { didSet { needsDisplay = true } }
+    var disclosureExpanded = false { didSet { needsDisplay = true; setAccessibilityValue(showsDisclosure ? (disclosureExpanded ? L("已展开"):L("已收起")):nil) } }
+    var iconSize: CGFloat = 12
     var isNavigation = false
     var isChip = false
     var hasError = false { didSet { needsDisplay = true } }
-    private var hovered = false
+    fileprivate var hovered = false
     var actionBlock: (()->Void)?
     init(_ title: String, action: @escaping ()->Void) {
         super.init(frame:.zero); self.title = title; isBordered = false; focusRingType = .none
@@ -103,24 +157,25 @@ private class ActionButton: NSButton {
         let typeface = selected ? NSFont.systemFont(ofSize:size,weight:.semibold) : font ?? NSFont.systemFont(ofSize:size)
         let attrs: [NSAttributedString.Key:Any] = [.font:typeface,.foregroundColor:color]
         let textSize = (title as NSString).size(withAttributes:attrs)
-        let iconSide: CGFloat = isNavigation ? 16:12
+        let iconSide: CGFloat = isNavigation ? 16:iconSize
         let imageWidth: CGFloat = image == nil ? 0:iconSide+(isNavigation ? 8:6)
-        let x = showsDisclosure || alignment == .left ? (isNavigation ? 12:10):max(4,(bounds.width-textSize.width-imageWidth)/2)
+        let x = title.isEmpty && image != nil ? (bounds.width-iconSide)/2 : alignment == .left ? (isNavigation ? 12:10):max(4,(bounds.width-textSize.width-imageWidth)/2)
         if let image {
             let tinted = image.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors:[color])) ?? image
             tinted.draw(in:NSRect(x:x,y:bounds.midY-iconSide/2,width:iconSide,height:iconSide),from:.zero,operation:.sourceOver,fraction:1,respectFlipped:true,hints:nil)
         }
-        (title as NSString).draw(at:NSPoint(x:x+imageWidth,y:bounds.midY-textSize.height/2),withAttributes:attrs)
-        if showsDisclosure {
-            let arrow = NSBezierPath(); let x = bounds.maxX-11; let y = bounds.midY
-            let down: CGFloat = (isFlipped ? 1:-1) * (disclosureExpanded ? -1:1)
-            arrow.move(to:NSPoint(x:x-3,y:y-down)); arrow.line(to:NSPoint(x:x,y:y+2*down)); arrow.line(to:NSPoint(x:x+3,y:y-down)); arrow.lineWidth = 1.2
-            color.setStroke(); arrow.stroke()
-        }
-        if window?.firstResponder === self,window?.isKeyWindow == true,NSApp.isFullKeyboardAccessEnabled {
-            let underline = NSBezierPath(); underline.move(to:NSPoint(x:x+imageWidth,y:4)); underline.line(to:NSPoint(x:x+imageWidth+textSize.width,y:4))
-            Ink.accentText.withAlphaComponent(0.8).setStroke(); underline.stroke()
-        }
+        let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byTruncatingMiddle
+        paragraph.alignment = alignment == .left ? .left:.center
+        var textAttrs = attrs; textAttrs[.paragraphStyle] = paragraph
+        let textX = alignment == .left ? x+imageWidth:4+imageWidth
+        (title as NSString).draw(in:NSRect(x:textX,y:bounds.midY-textSize.height/2,width:max(0,bounds.width-textX-4),height:textSize.height),withAttributes:textAttrs)
+        drawKeyboardFocus(self)
+    }
+    override func becomeFirstResponder() -> Bool { let result = super.becomeFirstResponder(); needsDisplay = true; return result }
+    override func resignFirstResponder() -> Bool { let result = super.resignFirstResponder(); needsDisplay = true; return result }
+    override func keyDown(with event: NSEvent) {
+        if showsDisclosure && [UInt16(125),126,36,49].contains(event.keyCode) { performClick(nil) }
+        else { super.keyDown(with:event) }
     }
     @objc private func invoke() {
         // Starting a sheet inside the action must not leave the origin pressed.
@@ -135,11 +190,12 @@ private final class PickerSurface: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let path = NSBezierPath(roundedRect:NSRect(x:0.5,y:0.5,width:bounds.width-1,height:bounds.height-1),xRadius:5,yRadius:5)
         Ink.sidebar.setFill(); path.fill()
-        Ink.accent.withAlphaComponent(0.45).setStroke(); path.lineWidth = 1; path.stroke()
+        Ink.rule.setStroke(); path.lineWidth = 1; path.stroke()
     }
 }
 private final class PickerRow: NSButton {
     var hovered = false
+    var keyboardHighlighted = false { didSet { needsDisplay = true } }
     var selectedEdge = false
     override var isOpaque: Bool { false }
     init(_ title: String,selected: Bool) {
@@ -156,18 +212,18 @@ private final class PickerRow: NSButton {
     override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
     override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
     override func draw(_ dirtyRect: NSRect) {
-        if hovered || selectedEdge {
-            let pill = NSBezierPath(roundedRect:NSRect(x:4,y:2,width:bounds.width-8,height:bounds.height-4),xRadius:5,yRadius:5)
-            (selectedEdge ? Ink.accent.withAlphaComponent(0.16):NSColor.white.withAlphaComponent(0.07)).setFill(); pill.fill()
+        if hovered || selectedEdge || keyboardHighlighted {
+            let pill = NSBezierPath(roundedRect:bounds.insetBy(dx:PickerLayout.padding,dy:0),xRadius:4,yRadius:4)
+            (hovered || keyboardHighlighted ? Ink.accent.withAlphaComponent(0.14):Ink.accent.withAlphaComponent(0.08)).setFill(); pill.fill()
         }
-        let color: NSColor = selectedEdge ? Ink.hi:hovered ? Ink.hi:Ink.mid
-        let typeface = NSFont.systemFont(ofSize:12,weight:selectedEdge ? .semibold:.regular)
-        let attrs: [NSAttributedString.Key:Any] = [.font:typeface,.foregroundColor:color]
-        let size = (title as NSString).size(withAttributes:attrs)
-        (title as NSString).draw(at:NSPoint(x:10,y:(bounds.height-size.height)/2),withAttributes:attrs)
+        PickerLayout.drawTitle(title,in:bounds,color:selectedEdge || hovered || keyboardHighlighted ? Ink.hi:Ink.mid)
         if selectedEdge {
-            let dot = NSBezierPath(ovalIn:NSRect(x:bounds.width-13.5,y:bounds.midY-2.5,width:5,height:5))
-            Ink.accent.setFill(); dot.fill()
+            let slot = PickerLayout.indicatorRect(in:bounds)
+            Ink.accent.setFill(); NSBezierPath(ovalIn:NSRect(x:slot.midX-2,y:slot.midY-2,width:4,height:4)).fill()
+        }
+        if keyboardHighlighted {
+            let ring = NSBezierPath(roundedRect:bounds.insetBy(dx:PickerLayout.padding+0.5,dy:0.5),xRadius:4,yRadius:4)
+            Ink.accent.setStroke(); ring.lineWidth = 1; ring.stroke()
         }
     }
 }
@@ -179,6 +235,9 @@ private final class NumericFieldBox: NSView {
         let path = NSBezierPath(roundedRect:NSRect(x:0.5,y:0.5,width:bounds.width-1,height:bounds.height-1),xRadius:6,yRadius:6)
         NSColor.white.withAlphaComponent(0.05).setFill(); path.fill()
         NSColor.white.withAlphaComponent(0.14).setStroke(); path.lineWidth = 1; path.stroke()
+        if let field = subviews.first as? NSTextField, field.currentEditor() != nil {
+            Ink.accent.setStroke(); path.lineWidth = 2; path.stroke()
+        }
     }
 }
 private final class StepGlyphButton: NSButton {
@@ -191,7 +250,9 @@ private final class StepGlyphButton: NSButton {
         target = self; self.action = #selector(invoke)
     }
     required init?(coder: NSCoder) { nil }
-    @objc private func invoke() { actionBlock?() }
+    override func becomeFirstResponder() -> Bool { let result = super.becomeFirstResponder(); needsDisplay = true; return result }
+    override func resignFirstResponder() -> Bool { let result = super.resignFirstResponder(); needsDisplay = true; return result }
+    @objc private func invoke() { highlight(false); state = .off; actionBlock?() }
     override var isOpaque: Bool { false }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -211,6 +272,7 @@ private final class StepGlyphButton: NSButton {
         glyph.move(to:NSPoint(x:cx-arm,y:cy)); glyph.line(to:NSPoint(x:cx+arm,y:cy))
         if plus { glyph.move(to:NSPoint(x:cx,y:cy-arm)); glyph.line(to:NSPoint(x:cx,y:cy+arm)) }
         glyph.stroke()
+        drawKeyboardFocus(self)
     }
 }
 private enum NumericSetting: String, CaseIterable {
@@ -248,6 +310,21 @@ private enum NumericSetting: String, CaseIterable {
 }
 private final class DropdownButton: ActionButton {
     override var showsDisclosure: Bool { true }
+    override func draw(_ dirtyRect: NSRect) {
+        let active = isEnabled && (hovered || isHighlighted || disclosureExpanded)
+        let surface = NSBezierPath(roundedRect:bounds.insetBy(dx:0.5,dy:0.5),xRadius:5,yRadius:5)
+        Ink.accent.withAlphaComponent(!isEnabled ? 0.04:active ? 0.14:0.08).setFill(); surface.fill()
+        Ink.accent.withAlphaComponent(!isEnabled ? 0.22:active ? 0.65:0.4).setStroke(); surface.lineWidth = 1; surface.stroke()
+        let color = !isEnabled ? Ink.low:active ? Ink.hi:Ink.accentText
+        PickerLayout.drawTitle(title,in:bounds,color:color)
+        let slot = PickerLayout.indicatorRect(in:bounds)
+        let direction: CGFloat = (isFlipped ? 1:-1) * (disclosureExpanded ? -1:1)
+        let arrow = NSBezierPath(); arrow.lineWidth = 1.2; arrow.lineCapStyle = .round; arrow.lineJoinStyle = .round
+        arrow.move(to:NSPoint(x:slot.minX,y:slot.midY-direction))
+        arrow.line(to:NSPoint(x:slot.midX,y:slot.midY+2*direction))
+        arrow.line(to:NSPoint(x:slot.maxX,y:slot.midY-direction)); color.setStroke(); arrow.stroke()
+        drawKeyboardFocus(self)
+    }
 }
 final class MainWindowController: NSWindowController, NSWindowDelegate {
     let store: BindingStore
@@ -259,6 +336,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let rows = TopAlignedStack()
     private let settingsRows = TopAlignedStack()
     private let generalRows = TopAlignedStack()
+    private let emptyState = TopAlignedStack()
+    private let undoNotice = TopAlignedStack()
+    private var undoTimer: Timer?
+    private var numericFields: [NumericSetting:NSTextField] = [:]
+    private var numericControls: [NumericSetting:[NSControl]] = [:]
+    private var numericLabels: [NumericSetting:[NSTextField]] = [:]
+    private var switches: [String:NSSwitch] = [:]
+    private weak var modeButton: DropdownButton?
+    private var pickerRows: [PickerRow] = []
+    private var pickerIndex = 0
+    var onBindingRestored: ((UUID,@escaping ()->Void)->Void)?
     private let settingsError = label("",11)
     private var navigationButtons: [NSButton] = []
     private(set) var currentSection = 0
@@ -310,7 +398,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
     required init?(coder: NSCoder) { nil }
     deinit {
-        permissionTimer?.invalidate(); recordingTimer?.invalidate()
+        permissionTimer?.invalidate(); recordingTimer?.invalidate(); undoTimer?.invalidate()
         if let monitor { NSEvent.removeMonitor(monitor) }
         if let selectionMonitor { NSEvent.removeMonitor(selectionMonitor) }
     }
@@ -336,7 +424,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             rule.bottomAnchor.constraint(equalTo:root.bottomAnchor),rule.widthAnchor.constraint(equalToConstant:1)
         ])
         // Top-left brand mark: the plain P/e letters only — no plate, no wordmark.
-        brandIcon = NSImageView(); brandIcon.image = PeekMark.image(size:NSSize(width:84,height:63),template:true)
+        brandIcon = NSImageView(); brandIcon.image = PeekMark.sidebarImage(size:NSSize(width:84,height:63))
         brandIcon.contentTintColor = Ink.hi; brandIcon.imageScaling = .scaleProportionallyUpOrDown
         brandIcon.setAccessibilityLabel("Peek")
         brandIcon.translatesAutoresizingMaskIntoConstraints = false; sidebar.addSubview(brandIcon)
@@ -379,7 +467,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         permissionButton = ActionButton(L("开启窗口控制")) { [weak self] in self?.openAccessibility() }
         permissionButton.isChip = true
         permissionButton.isHidden = AXIsProcessTrusted()
-        buildSection(mainPage,views:[header,rows,permissionButton])
+        let emptyTitle = label(L("尚未添加应用"),14,.medium); emptyTitle.textColor = Ink.hi
+        let emptyHelp = NSTextField(wrappingLabelWithString:L("点击“新增应用”，设置快捷键和收起方向。"))
+        emptyHelp.font = .systemFont(ofSize:12); emptyHelp.textColor = Ink.mid
+        emptyState.orientation = .vertical; emptyState.alignment = .leading; emptyState.spacing = 8
+        emptyState.addArrangedSubview(emptyTitle); emptyState.addArrangedSubview(emptyHelp)
+        undoNotice.orientation = .vertical; undoNotice.alignment = .leading; undoNotice.spacing = 4
+        buildSection(mainPage,views:[header,emptyState,rows,undoNotice,permissionButton])
         buildSection(settingsPage,views:[label(L("收放"),20,.semibold),settingsRows])
         buildSection(generalPage,views:[label(L("通用"),20,.semibold),settingsCard(generalRows)])
         let version = Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "—"
@@ -419,12 +513,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         scroll.drawsBackground = false; scroll.borderType = .noBorder
         scroll.hasVerticalScroller = false; scroll.hasHorizontalScroller = false
         scroll.verticalScrollElasticity = .none; scroll.horizontalScrollElasticity = .none
+        let headerArea = NSView(); headerArea.translatesAutoresizingMaskIntoConstraints = false
         header.translatesAutoresizingMaskIntoConstraints = false; scroll.translatesAutoresizingMaskIntoConstraints = false
-        page.addSubview(header); page.addSubview(scroll)
+        page.addSubview(headerArea); headerArea.addSubview(header); page.addSubview(scroll)
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo:page.topAnchor,constant:40),header.leadingAnchor.constraint(equalTo:page.leadingAnchor,constant:20),header.trailingAnchor.constraint(equalTo:page.trailingAnchor,constant:-20),
-            scroll.topAnchor.constraint(equalTo:header.bottomAnchor,constant:18),scroll.leadingAnchor.constraint(equalTo:page.leadingAnchor,constant:20),
-            scroll.trailingAnchor.constraint(equalTo:page.trailingAnchor,constant:-20),scroll.bottomAnchor.constraint(equalTo:page.bottomAnchor,constant:-20)
+            headerArea.topAnchor.constraint(equalTo:page.topAnchor,constant:40),
+            headerArea.leadingAnchor.constraint(equalTo:page.leadingAnchor,constant:Layout.pageInset),
+            headerArea.trailingAnchor.constraint(equalTo:page.trailingAnchor,constant:-Layout.pageInset),
+            headerArea.heightAnchor.constraint(equalToConstant:Layout.headerHeight),
+            header.leadingAnchor.constraint(equalTo:headerArea.leadingAnchor),header.trailingAnchor.constraint(equalTo:headerArea.trailingAnchor),
+            header.centerYAnchor.constraint(equalTo:headerArea.centerYAnchor),
+            scroll.topAnchor.constraint(equalTo:headerArea.bottomAnchor,constant:18),scroll.leadingAnchor.constraint(equalTo:page.leadingAnchor,constant:Layout.pageInset),
+            scroll.trailingAnchor.constraint(equalTo:page.trailingAnchor,constant:-Layout.pageInset),scroll.bottomAnchor.constraint(equalTo:page.bottomAnchor,constant:-Layout.pageInset)
         ])
         let content = TopAlignedStack(views:Array(views.dropFirst()))
         content.orientation = .vertical; content.alignment = .leading; content.spacing = 18
@@ -439,6 +539,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     @objc func showApps() { navigate(to:0) }
     @objc func showSettings() { navigate(to:1) }
     @objc func showGeneral() { reloadGeneral(); navigate(to:2) }
+    func focusLanguagePicker() {
+        if let button = generalRows.arrangedSubviews.first?.subviews.compactMap({ $0 as? DropdownButton }).first {
+            window?.makeFirstResponder(button)
+        }
+    }
     private func navigate(to index: Int) {
         window?.makeFirstResponder(nil); stopRecording(); closeOptions()
         currentSection = index
@@ -452,6 +557,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let caption = label(title,13); caption.textColor = Ink.mid
         let toggle = NSSwitch(); toggle.state = isOn ? .on:.off
         toggle.target = self; toggle.action = action
+        switches[NSStringFromSelector(action)] = toggle
         toggle.setAccessibilityLabel(title)
         caption.translatesAutoresizingMaskIntoConstraints = false; toggle.translatesAutoresizingMaskIntoConstraints = false
         row.addSubview(caption); row.addSubview(toggle); stack.addArrangedSubview(row)
@@ -462,7 +568,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             toggle.trailingAnchor.constraint(equalTo:row.trailingAnchor,constant:stack === generalRows ? -24:0),toggle.centerYAnchor.constraint(equalTo:row.centerYAnchor)
         ])
         if spaceHelp || topHelp {
-            let info = NSButton(image:NSImage(systemSymbolName:"exclamationmark.circle",accessibilityDescription:topHelp ? L("顶部收放说明"):L("桌面切换说明"))!,target:self,action:topHelp ? #selector(showTopHelp(_:)):#selector(showSpaceHelp(_:)))
+            let info = NSButton(image:NSImage(systemSymbolName:"info.circle",accessibilityDescription:topHelp ? L("顶部收放说明"):L("桌面切换说明"))!,target:self,action:topHelp ? #selector(showTopHelp(_:)):#selector(showSpaceHelp(_:)))
             info.isBordered = false; info.contentTintColor = Ink.mid
             info.setAccessibilityLabel(topHelp ? L("顶部收放说明"):L("桌面切换说明"))
             info.toolTip = topHelp ? L("顶部可最小化窗口或隐藏整个应用。点击查看影响范围和动画说明。"):L("关闭：只在当前桌面收放。开启：允许激活窗口时切换到它所在的桌面，不搬动窗口的桌面归属。推荐把应用分配给所有桌面。")
@@ -492,7 +598,20 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         popover.contentViewController = content; spaceHelpPopover = popover
         popover.show(relativeTo:sender.bounds,of:sender,preferredEdge:.minY)
     }
+    private func updateSettings() {
+        let settings = store.hoverSettings
+        switches[NSStringFromSelector(#selector(hoverChanged(_:)))]?.state = settings.enabled ? .on:.off
+        for setting in NumericSetting.allCases {
+            let enabled = !setting.isDelay || settings.enabled
+            let field = numericFields[setting]
+            if field?.currentEditor() == nil { field?.stringValue = setting.formatted(setting.value(in:settings)) }
+            field?.textColor = enabled ? Ink.hi:Ink.low
+            for control in numericControls[setting] ?? [] { control.isEnabled = enabled; control.needsDisplay = true }
+            for caption in numericLabels[setting] ?? [] { caption.textColor = enabled ? Ink.mid:Ink.low }
+        }
+    }
     private func reloadSettings() {
+        numericFields.removeAll(); numericControls.removeAll(); numericLabels.removeAll()
         for view in settingsRows.arrangedSubviews { settingsRows.removeArrangedSubview(view); view.removeFromSuperview() }
         let settings = store.hoverSettings
         let rhythmRows = NSStackView(); rhythmRows.orientation = .vertical; rhythmRows.alignment = .leading; rhythmRows.spacing = Layout.rowSpacing
@@ -509,15 +628,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             minus.isEnabled = enabled; plus.isEnabled = enabled
             // Editable box: obvious enough that typing is expected, styled by us.
             let box = NumericFieldBox(); box.translatesAutoresizingMaskIntoConstraints = false
-            let field = NSTextField(string:setting.formatted(value))
+            let field = NumericTextField(string:setting.formatted(value))
             field.alignment = .center; field.isBordered = false; field.drawsBackground = false
             field.focusRingType = .none; field.font = .monospacedDigitSystemFont(ofSize:12,weight:.medium)
-            field.textColor = value > 0 ? Ink.hi:Ink.low
+            field.textColor = enabled ? Ink.hi:Ink.low
             field.identifier = NSUserInterfaceItemIdentifier(setting.rawValue)
             field.isEnabled = enabled
             field.target = self; field.action = #selector(numericFieldChanged(_:)); field.cell?.sendsActionOnEndEditing = true
             field.setAccessibilityLabel(title+"，\(setting.unit)")
-            field.toolTip = setting == .revealWidth ? L("0–100 逻辑像素（macOS pt）；0 保留最小边缘。左、右、底部共用，下次收起时生效。底部可能受系统最小标题栏限制。"):(setting.isDelay ? L("0–{0} 秒；步进 {1} 秒",Int(setting.limit),setting.step):L("仅控制左、右、底部的移动动画；顶部最小化和隐藏应用的过渡由 macOS 控制。"))
+            field.toolTip = setting == .revealWidth ? L("0–100 逻辑像素（macOS pt）；0 保留最小边缘。左、右、底部共用，下次收起时生效。底部可能受系统最小标题栏限制。"):(setting.isDelay ? L("等待后才展开或收起。0–{0} 秒；步进 {1} 秒。",Int(setting.limit),setting.step):L("仅控制左、右、底部的移动动画；顶部最小化和隐藏应用的过渡由 macOS 控制。"))
             field.translatesAutoresizingMaskIntoConstraints = false
             box.addSubview(field)
             NSLayoutConstraint.activate([
@@ -529,7 +648,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
                 control.widthAnchor.constraint(equalToConstant:24).isActive = true
                 control.heightAnchor.constraint(equalToConstant:22).isActive = true
             }
-            let unit = label(setting.unit,11); unit.textColor = Ink.low
+            let unit = label(setting.unit,11); unit.textColor = enabled ? Ink.mid:Ink.low
+            caption.textColor = enabled ? Ink.mid:Ink.low
+            numericFields[setting] = field; numericControls[setting] = [field,minus,plus]; numericLabels[setting] = [caption,unit]
             unit.widthAnchor.constraint(equalToConstant:24).isActive = true
             let row = NSStackView(views:[caption,NSView(),minus,box,plus,unit])
             row.orientation = .horizontal; row.alignment = .centerY; row.spacing = 5
@@ -544,6 +665,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         settingsError.widthAnchor.constraint(equalTo:rhythmRows.widthAnchor).isActive = true
     }
     private func reloadGeneral() {
+        if !generalRows.arrangedSubviews.isEmpty { updateGeneral(); return }
         for view in generalRows.arrangedSubviews { generalRows.removeArrangedSubview(view); view.removeFromSuperview() }
         let language = DropdownButton(Localization.language.title,action:{})
         language.isChip = true; language.setAccessibilityLabel(L("语言"))
@@ -565,6 +687,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         addSwitchRow(L("顶部收放（实验）"),isOn:store.hoverSettings.topEnabled,action:#selector(topEnabledChanged(_:)),to:generalRows,topHelp:true)
         let caption = label(L("顶部收起方式"),13); caption.textColor = Ink.mid
         let mode = DropdownButton(store.hoverSettings.topHideMode.title,action:{})
+        modeButton = mode
         mode.isChip = true; mode.isEnabled = store.hoverSettings.topEnabled
         mode.setAccessibilityLabel(L("顶部收起方式"))
         mode.actionBlock = { [weak self,weak mode] in
@@ -579,18 +702,31 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let modeRow = NSStackView(views:[caption,NSView(),mode]); modeRow.orientation = .horizontal; modeRow.alignment = .centerY
         modeRow.edgeInsets = NSEdgeInsets(top:0,left:0,bottom:0,right:24); generalRows.addArrangedSubview(modeRow)
         NSLayoutConstraint.activate([modeRow.widthAnchor.constraint(equalTo:generalRows.widthAnchor),modeRow.heightAnchor.constraint(equalToConstant:Layout.rowHeight),mode.widthAnchor.constraint(equalToConstant:156),mode.heightAnchor.constraint(equalToConstant:28)])
-        let modeInfo = NSButton(image:NSImage(systemSymbolName:"exclamationmark.circle",accessibilityDescription:L("顶部收起方式说明"))!,target:self,action:#selector(showTopModeHelp(_:)))
+        let modeInfo = NSButton(image:NSImage(systemSymbolName:"info.circle",accessibilityDescription:L("顶部收起方式说明"))!,target:self,action:#selector(showTopModeHelp(_:)))
         modeInfo.isBordered = false; modeInfo.contentTintColor = Ink.mid
         modeInfo.setAccessibilityLabel(L("顶部收起方式说明"))
         modeInfo.toolTip = L("多窗口应用建议使用最小化；隐藏应用会同时隐藏它的所有窗口。")
         modeInfo.translatesAutoresizingMaskIntoConstraints = false; modeRow.addSubview(modeInfo)
         NSLayoutConstraint.activate([modeInfo.trailingAnchor.constraint(equalTo:modeRow.trailingAnchor),modeInfo.centerYAnchor.constraint(equalTo:modeRow.centerYAnchor),modeInfo.widthAnchor.constraint(equalToConstant:18),modeInfo.heightAnchor.constraint(equalToConstant:22)])
         addSwitchRow(L("允许切换桌面"),isOn:store.hoverSettings.allowSpaceSwitch,action:#selector(spaceSwitchChanged(_:)),to:generalRows,spaceHelp:true)
-        if state == .requiresApproval {
-            let hint = label(L("请在系统设置的登录项中允许 Peek。"),11); hint.textColor = .secondaryLabelColor; generalRows.addArrangedSubview(hint)
+        do {
+            let hint = label(L("请在系统设置的登录项中允许 Peek。"),11); hint.textColor = .secondaryLabelColor; hint.identifier = NSUserInterfaceItemIdentifier("loginHint"); generalRows.addArrangedSubview(hint)
             let openLogin = ActionButton(L("打开登录项设置")) { SMAppService.openSystemSettingsLoginItems() }
-            openLogin.isChip = true; generalRows.addArrangedSubview(openLogin)
+            openLogin.isChip = true; openLogin.identifier = NSUserInterfaceItemIdentifier("loginHint"); generalRows.addArrangedSubview(openLogin)
         }
+        updateGeneral()
+    }
+    private func updateGeneral() {
+        let state = SMAppService.mainApp.status
+        let states: [(Selector,Bool)] = [
+            (#selector(loginChanged(_:)),state == .enabled || state == .requiresApproval),
+            (#selector(menuBarIconChanged(_:)),store.menuBarIconVisible),
+            (#selector(topEnabledChanged(_:)),store.hoverSettings.topEnabled),
+            (#selector(spaceSwitchChanged(_:)),store.hoverSettings.allowSpaceSwitch)]
+        for (action,value) in states { switches[NSStringFromSelector(action)]?.state = value ? .on:.off }
+        modeButton?.title = store.hoverSettings.topHideMode.title
+        modeButton?.isEnabled = store.hoverSettings.topEnabled; modeButton?.needsDisplay = true
+        for view in generalRows.arrangedSubviews where view.identifier?.rawValue == "loginHint" { view.isHidden = state != .requiresApproval }
     }
     @objc private func numericFieldChanged(_ sender: NSTextField) {
         guard let key = sender.identifier?.rawValue,let setting = NumericSetting(rawValue:key) else { return }
@@ -604,16 +740,20 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         } catch { setSettingsError(error.localizedDescription) }
         let saved = setting.value(in:store.hoverSettings)
         sender.stringValue = setting.formatted(saved)
-        sender.textColor = saved > 0 ? Ink.hi:Ink.low
+        sender.textColor = sender.isEnabled ? Ink.hi:Ink.low
     }
     @objc private func hoverChanged(_ sender: NSSwitch) {
-        do { try store.configureHover(enabled:sender.state == .on); onBindingsChanged?(); setSettingsError(""); reloadSettings() }
-        catch { setSettingsError(error.localizedDescription); reloadSettings() }
+        do { try store.configureHover(enabled:sender.state == .on); onBindingsChanged?(); setSettingsError(""); updateSettings() }
+        catch { setSettingsError(error.localizedDescription); updateSettings() }
     }
     @objc private func topEnabledChanged(_ sender: NSSwitch) {
         do { try store.configureHover(topEnabled:sender.state == .on); onBindingsChanged?() }
         catch { setStatus(error.localizedDescription) }
-        closeOptions(); reload()
+        closeOptions(); updateGeneral()
+        for binding in store.bindings {
+            directionButtons[binding.id]?.title = binding.selectedEdge == .top && !store.hoverSettings.topEnabled ? L("已停用"):binding.selectedEdge.title
+            updateBindingStatus(binding.id)
+        }
     }
     @objc private func spaceSwitchChanged(_ sender: NSSwitch) {
         do { try store.configureHover(allowSpaceSwitch:sender.state == .on); onBindingsChanged?() }
@@ -649,51 +789,70 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         stopRecording(); shortcutButtons.removeAll(); directionButtons.removeAll(); statusButtons.removeAll(); onBindingsChanged?()
         for view in rows.arrangedSubviews { rows.removeArrangedSubview(view); view.removeFromSuperview() }
         rows.isHidden = store.bindings.isEmpty
+        emptyState.isHidden = !store.bindings.isEmpty
+        reloadUndoNotice()
         for binding in store.bindings {
             let icon = NSImageView(image:NSWorkspace.shared.icon(forFile:binding.resolvedURL?.path ?? binding.path))
             icon.translatesAutoresizingMaskIntoConstraints = false
-            icon.widthAnchor.constraint(equalToConstant:28).isActive = true; icon.heightAnchor.constraint(equalToConstant:28).isActive = true
-            let name = label(binding.name,13.5,.medium); name.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
-            let title = NSStackView(views:[name]); title.orientation = .vertical; title.alignment = .leading; title.spacing = 1
+            icon.heightAnchor.constraint(equalToConstant:24).isActive = true
+            let name = ApplicationNameField(labelWithString:binding.name)
+            name.font = .systemFont(ofSize:13.5,weight:.medium)
+            name.lineBreakMode = .byTruncatingTail; name.usesSingleLineMode = true; name.cell?.wraps = false
+            name.toolTip = binding.name; name.setAccessibilityLabel(binding.name); name.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
             let shortcut = ActionButton(binding.shortcut?.title ?? L("录制快捷键")) { [weak self] in self?.record(binding.id) }
-            shortcutButtons[binding.id] = shortcut; shortcut.font = .monospacedSystemFont(ofSize:12,weight:.medium); shortcut.isChip = true
-            shortcut.widthAnchor.constraint(greaterThanOrEqualToConstant:52).isActive = true
+            shortcutButtons[binding.id] = shortcut; shortcut.font = .monospacedSystemFont(ofSize:11,weight:.medium); shortcut.isChip = true
             shortcut.setAccessibilityLabel(L("{0}：{1}",binding.name,binding.shortcut?.title ?? L("录制快捷键")))
             shortcut.hasError = hotkeys.errors[binding.id] != nil
-            shortcut.toolTip = hotkeys.errors[binding.id].map(Localization.refresh); shortcut.setAccessibilityHelp(shortcut.toolTip)
+            shortcut.toolTip = hotkeys.errors[binding.id].map(Localization.refresh) ?? shortcut.title; shortcut.setAccessibilityHelp(shortcut.toolTip)
             let remove = ActionButton("") { [weak self] in self?.remove(binding.id) }
             remove.image = NSImage(systemSymbolName:"xmark",accessibilityDescription:L("删除 {0}",binding.name))
             remove.setAccessibilityLabel(L("删除 {0}",binding.name)); remove.toolTip = L("删除绑定")
-            remove.widthAnchor.constraint(equalToConstant:24).isActive = true
+            remove.iconSize = 10
             let inactiveTop = binding.selectedEdge == .top && !store.hoverSettings.topEnabled
             let direction = DropdownButton(inactiveTop ? L("已停用"):binding.selectedEdge.title,action:{})
             directionButtons[binding.id] = direction
             direction.toolTip = bindingStatus[binding.id].map { L("上次操作：")+$0.0 }
             direction.hasError = false
             direction.setAccessibilityHelp(bindingStatus[binding.id]?.0)
-            direction.isChip = true; direction.widthAnchor.constraint(equalToConstant:86).isActive = true
+            direction.isChip = true; direction.font = .systemFont(ofSize:11)
             direction.setAccessibilityLabel(L("收起方向：")+binding.selectedEdge.title)
             direction.actionBlock = { [weak self,weak direction] in if let direction { self?.showDirections(binding,from:direction) } }
-            for control in [shortcut,remove,direction] {
+            for control in [shortcut,direction] {
                 control.translatesAutoresizingMaskIntoConstraints = false; control.heightAnchor.constraint(equalToConstant:28).isActive = true
-                control.setContentCompressionResistancePriority(.required,for:.horizontal)
+                control.setContentCompressionResistancePriority(.defaultHigh,for:.horizontal)
             }
-            let status = NSButton(image:NSImage(systemSymbolName:"exclamationmark.circle",accessibilityDescription:L("收放状态说明"))!,target:self,action:#selector(showBindingHelp(_:)))
+            let status = ApplicationStatusButton(image:NSImage(systemSymbolName:"exclamationmark.circle",accessibilityDescription:L("收放状态说明"))!,target:self,action:#selector(showBindingHelp(_:)))
+            status.image = status.image?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize:11,weight:.regular))
+            status.imageScaling = .scaleProportionallyDown
             status.isBordered = false; status.contentTintColor = .systemRed
             status.identifier = NSUserInterfaceItemIdentifier(binding.id.uuidString)
             statusButtons[binding.id] = status
             let statusSlot = NSView(); statusSlot.translatesAutoresizingMaskIntoConstraints = false
             status.translatesAutoresizingMaskIntoConstraints = false; statusSlot.addSubview(status)
-            NSLayoutConstraint.activate([statusSlot.widthAnchor.constraint(equalToConstant:18),statusSlot.heightAnchor.constraint(equalToConstant:28),status.centerYAnchor.constraint(equalTo:statusSlot.centerYAnchor),status.centerXAnchor.constraint(equalTo:statusSlot.centerXAnchor),status.widthAnchor.constraint(equalToConstant:18),status.heightAnchor.constraint(equalToConstant:22)])
-            updateBindingStatus(binding.id)
-            let topRow = NSStackView(views:[icon,title,NSView(),direction,shortcut,remove,statusSlot]); topRow.orientation = .horizontal; topRow.alignment = .centerY; topRow.spacing = 8
-            let card = GlassCard(); card.translatesAutoresizingMaskIntoConstraints = false
-            topRow.translatesAutoresizingMaskIntoConstraints = false; card.addSubview(topRow)
             NSLayoutConstraint.activate([
-                card.heightAnchor.constraint(equalToConstant:44),
-                topRow.centerYAnchor.constraint(equalTo:card.centerYAnchor),topRow.heightAnchor.constraint(equalToConstant:28),
-                topRow.leadingAnchor.constraint(equalTo:card.leadingAnchor,constant:12),topRow.trailingAnchor.constraint(equalTo:card.trailingAnchor,constant:-12)
+                statusSlot.heightAnchor.constraint(equalToConstant:28),
+                status.centerYAnchor.constraint(equalTo:statusSlot.centerYAnchor),
+                status.centerXAnchor.constraint(equalTo:statusSlot.centerXAnchor),
+                status.widthAnchor.constraint(equalToConstant:14),status.heightAnchor.constraint(equalToConstant:22),
+                remove.heightAnchor.constraint(equalToConstant:22)
             ])
+            updateBindingStatus(binding.id)
+            let card = GlassCard(); card.translatesAutoresizingMaskIntoConstraints = false
+            card.heightAnchor.constraint(equalToConstant:44).isActive = true
+            let columns: [NSView] = [icon,name,direction,shortcut,statusSlot,remove]
+            for (index,column) in columns.enumerated() {
+                column.translatesAutoresizingMaskIntoConstraints = false; card.addSubview(column)
+                NSLayoutConstraint.activate([
+                    column.widthAnchor.constraint(equalToConstant:ApplicationRowLayout.widths[index]),
+                    column.centerYAnchor.constraint(equalTo:card.centerYAnchor)
+                ])
+                if index == 0 {
+                    column.leadingAnchor.constraint(equalTo:card.leadingAnchor,constant:ApplicationRowLayout.inset).isActive = true
+                } else {
+                    column.leadingAnchor.constraint(equalTo:columns[index-1].trailingAnchor,constant:ApplicationRowLayout.gaps[index-1]).isActive = true
+                }
+            }
+            remove.trailingAnchor.constraint(equalTo:card.trailingAnchor,constant:-ApplicationRowLayout.trailingInset).isActive = true
             rows.addArrangedSubview(card); card.widthAnchor.constraint(equalTo:rows.widthAnchor).isActive = true
         }
         reloadSettings(); reloadGeneral()
@@ -702,13 +861,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
     private func stepValue(_ setting: NumericSetting,_ delta: Double) {
         // Commit a live text edit before changing its value or replacing the row.
-        window?.makeFirstResponder(nil)
+        if let editor = window?.firstResponder as? NSTextView, editor.isFieldEditor { window?.makeFirstResponder(nil) }
         let next = setting.normalized(setting.value(in:store.hoverSettings)+delta)
         do {
             try setting.save(next,to:store)
             onBindingsChanged?(); setSettingsError("")
         } catch { setSettingsError(error.localizedDescription) }
-        reloadSettings()
+        updateSettings()
     }
     static func applicationPanel() -> NSOpenPanel {
         let panel = NSOpenPanel(); panel.title = L("选择应用"); panel.prompt = L("添加")
@@ -733,6 +892,34 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         if let onPrepareChange { onPrepareChange(id) { [weak self] success in
             if success { action() } else { self?.setStatus(L("窗口尚未恢复，暂时不能更改绑定。请稍后重试。")) }
         } } else { action() }
+    }
+    private func reloadUndoNotice() {
+        undoTimer?.invalidate(); undoTimer = nil
+        for view in undoNotice.arrangedSubviews { undoNotice.removeArrangedSubview(view); view.removeFromSuperview() }
+        guard let pending = store.pendingRemoval,pending.expires > Date() else { undoNotice.isHidden = true; return }
+        undoNotice.isHidden = false
+        let text = label(L("已删除 {0}",pending.binding.name),12); text.textColor = Ink.mid
+        text.toolTip = text.stringValue
+        let undo = ActionButton(L("撤销")) { [weak self] in self?.undoRemoval() }
+        undo.isChip = true; undo.keyEquivalent = "z"; undo.keyEquivalentModifierMask = .command
+        undo.setAccessibilityLabel(L("撤销删除 {0}",pending.binding.name))
+        let row = NSStackView(views:[text,NSView(),undo]); row.alignment = .centerY; row.spacing = 8
+        text.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
+        undo.setContentCompressionResistancePriority(.required,for:.horizontal)
+        undoNotice.addArrangedSubview(row); row.widthAnchor.constraint(equalTo:undoNotice.widthAnchor).isActive = true
+        let timer = Timer(timeInterval:pending.expires.timeIntervalSinceNow,repeats:false) { [weak self] _ in self?.reloadUndoNotice() }
+        RunLoop.main.add(timer,forMode:.common); undoTimer = timer
+    }
+    private func undoRemoval() {
+        do {
+            guard let id = try store.undoRemoval() else { reloadUndoNotice(); return }
+            let finish: ()->Void = { [weak self] in
+                guard let self else { return }
+                self.hotkeys.reload(self.store.bindings); self.reload()
+                if let button = self.shortcutButtons[id] { self.window?.makeFirstResponder(button) }
+            }
+            if let onBindingRestored { onBindingRestored(id,finish) } else { finish() }
+        } catch { setStatus(error.localizedDescription) }
     }
     private func remove(_ id: UUID) {
         stopRecording(); closeOptions()
@@ -780,9 +967,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         if selectionPanel != nil,pickerAnchor === anchor { closeSelection(); return }
         closeOptions()
         anchor.window?.contentView?.layoutSubtreeIfNeeded()
+        pickerRows = []; pickerIndex = max(0,min(selected,titles.count-1))
         pickerSelection = onSelect; pickerAnchor = anchor as? ActionButton
         pickerAnchor?.disclosureExpanded = true
-        let rowHeight: CGFloat = 28, padding: CGFloat = 4
+        let rowHeight = PickerLayout.rowHeight, padding = PickerLayout.padding
         let width = anchor.bounds.width
         let height = CGFloat(titles.count)*rowHeight + padding*2
         let panel = NSPanel(contentRect:NSRect(x:0,y:0,width:width,height:height),styleMask:[.borderless,.nonactivatingPanel],backing:.buffered,defer:false)
@@ -800,7 +988,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             row.tag = index; row.target = self; row.action = #selector(pickerRowPressed(_:))
             row.setAccessibilityLabel("\(label)：\(title)")
             row.setAccessibilityValue(index == selected ? L("已选择"):L("未选择"))
-            surface.addSubview(row)
+            row.state = index == selected ? .on:.off
+            row.keyboardHighlighted = NSApp.currentEvent?.type == .keyDown && index == pickerIndex
+            pickerRows.append(row); surface.addSubview(row)
         }
         selectionPanel = panel
         guard let window,let anchorWindow = anchor.window else { closeSelection(); return }
@@ -816,8 +1006,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         selectionMonitor = NSEvent.addLocalMonitorForEvents(matching:[.leftMouseDown,.rightMouseDown,.keyDown,.scrollWheel]) { [weak self] event in
             guard let self else { return event }
             if event.type == .keyDown {
-                guard event.keyCode == 53 else { return event }
-                self.closeSelection(); return nil
+                guard event.modifierFlags.intersection([.command,.control,.option]).isEmpty else { self.closeSelection(); return event }
+                switch event.keyCode {
+                case 53: self.closeSelection(); return nil
+                case 48:
+                    let anchor = self.pickerAnchor; self.closeSelection()
+                    if event.modifierFlags.contains(.shift) { anchor?.window?.selectPreviousKeyView(anchor) }
+                    else { anchor?.window?.selectNextKeyView(anchor) }; return nil
+                case 125: self.movePicker(to:(self.pickerIndex+1) % self.pickerRows.count)
+                case 126: self.movePicker(to:(self.pickerIndex+self.pickerRows.count-1) % self.pickerRows.count)
+                case 115: self.movePicker(to:0)
+                case 119: self.movePicker(to:self.pickerRows.count-1)
+                case 36,76,49: self.pickerRowPressed(self.pickerRows[self.pickerIndex])
+                default: break
+                }
+                return nil
             }
             if let content = panel.contentView,event.window === panel,
                content.bounds.contains(content.convert(event.locationInWindow,from:nil)) { return event }
@@ -827,12 +1030,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             self.closeSelection(); return event
         }
     }
+    private func movePicker(to index: Int) {
+        pickerIndex = index
+        for (i,row) in pickerRows.enumerated() { row.keyboardHighlighted = i == index }
+        if pickerRows.indices.contains(index) { NSAccessibility.post(element:pickerRows[index],notification:.focusedUIElementChanged) }
+    }
     private func closeSelection() {
         if let selectionMonitor { NSEvent.removeMonitor(selectionMonitor) }
         selectionMonitor = nil
         if let selectionPanel { selectionPanel.parent?.removeChildWindow(selectionPanel); selectionPanel.orderOut(nil) }
         selectionPanel = nil; pickerSelection = nil
-        pickerAnchor?.disclosureExpanded = false; pickerAnchor = nil
+        let anchor = pickerAnchor
+        pickerAnchor?.disclosureExpanded = false; pickerAnchor = nil; pickerRows = []
+        if let anchor,anchor.window?.isKeyWindow == true { anchor.window?.makeFirstResponder(anchor) }
     }
     @objc private func pickerRowPressed(_ sender: NSButton) {
         let selection = pickerSelection
@@ -844,7 +1054,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
               let current = store.bindings.first(where:{$0.id == id}),current.selectedEdge != edge else { return }
         prepare(id) { [weak self] in
             guard let self else { return }
-            do { try self.store.configure(id,edge:edge,windowTitle:nil,changeWindow:true); self.bindingStatus.removeValue(forKey:id); self.reload() }
+            do { try self.store.configure(id,edge:edge,windowTitle:nil,changeWindow:true); self.bindingStatus.removeValue(forKey:id); self.reload(); if let button = self.directionButtons[id] { self.window?.makeFirstResponder(button) } }
             catch { self.setStatus(error.localizedDescription) }
         }
     }
@@ -857,11 +1067,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         guard let window,window.attachedSheet == nil,let button = shortcutButtons[id] else { return }
         showApps(); setStatus("")
         hotkeys.suspend(); onRecordingChanged?(true); recordingID = id; recorderButton = button
-        button.title = L("● 按下快捷键"); button.toolTip = L("Esc 取消，Delete 清除"); button.invalidateIntrinsicContentSize()
+        button.title = L("● 录制中"); button.toolTip = L("Esc 取消，Delete 清除"); button.invalidateIntrinsicContentSize()
         window.makeFirstResponder(button)
         recordingTimer = Timer.scheduledTimer(withTimeInterval:0.6,repeats:true) { [weak self] _ in
             guard let self else { return }; self.recordingPulse.toggle()
-            self.recorderButton?.title = self.recordingPulse ? L("○ 按下快捷键"):L("● 按下快捷键")
+            self.recorderButton?.title = self.recordingPulse ? L("○ 录制中"):L("● 录制中")
         }
         monitor = NSEvent.addLocalMonitorForEvents(matching:[.keyDown,.leftMouseDown]) { [weak self] event in
             guard let self else { return event }

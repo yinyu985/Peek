@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")"
-version=1.4.14
-build_number=54
+version=1.4.15
+build_number=60
 if [ "${RELEASE_TAG:-v$version}" != "v$version" ]; then
     echo "Release tag must match the app version: v$version" >&2
     exit 1
@@ -16,6 +16,7 @@ for arch in arm64 x86_64; do
     app="$work/$arch/Peek.app"
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
     cp -R Resources/en.lproj Resources/zh-Hans.lproj "$app/Contents/Resources/"
+    cp Resources/AppIcon-1024.png "$app/Contents/Resources/AppIcon-1024.png"
     cp Resources/MenuBarIcon-64.png "$app/Contents/Resources/MenuBarIcon-64.png"
     cp Resources/AppIcon.icns "$app/Contents/Resources/PeekIcon.icns"
     xcrun swiftc -O -sdk "$sdk" -target "$arch-apple-macos13.0" \

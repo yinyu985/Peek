@@ -63,6 +63,7 @@ final class Controller: NSObject,NSApplicationDelegate {
     private func makeMainWindow() {
         mainWindow = MainWindowController(store:store,hotkeys:hotkeys)
         mainWindow.onPrepareChange = { [weak self] id,completion in self?.toggler.forget(id,completion:completion) }
+        mainWindow.onBindingRestored = { [weak self] id,completion in self?.toggler.reattach(id,completion:completion) }
         mainWindow.onBindingRemoved = { [weak self] id in self?.toggler.detach(id) }
         mainWindow.onBindingsChanged = { [weak self] in
             guard let self else { return }
@@ -81,7 +82,7 @@ final class Controller: NSObject,NSApplicationDelegate {
             if let frame { self.mainWindow.window?.setFrame(frame,display:false) }
             for (id,status) in statuses { self.mainWindow.setBindingStatus(id,status.0,status.1) }
             self.mainWindow.showGeneral()
-            self.rebuildMenus(); self.openWindow()
+            self.rebuildMenus(); self.openWindow(); self.mainWindow.focusLanguagePicker()
         }
     }
     private func rebuildMenus() {

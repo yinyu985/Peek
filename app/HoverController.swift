@@ -10,6 +10,36 @@ enum PointerInteraction {
         CGEventSource.secondsSinceLastEventType(.combinedSessionState,eventType:.leftMouseUp) < 0.2
     }
 }
+// Dock hosts Launchpad and Mission Control. Large visible Dock surfaces are
+// a conservative stop signal; ordinary Dock strips and menus do not qualify.
+enum SystemInterface {
+    static func isHotCorner(_ point: CGPoint) -> Bool {
+        var displays = [CGDirectDisplayID](repeating:0,count:32)
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(UInt32(displays.count),&displays,&count) == .success else { return true }
+        return displays.prefix(Int(count)).contains { display in
+            let s = CGDisplayBounds(display)
+            return s.contains(point) && (point.x < s.minX+16 || point.x >= s.maxX-16) &&
+                (point.y < s.minY+16 || point.y >= s.maxY-16)
+        }
+    }
+    static var pausesAutomaticControl: Bool {
+        guard let pointer = CGEvent(source:nil)?.location else { return true }
+        return isHotCorner(pointer) || isPresented
+    }
+    static var isPresented: Bool {
+        guard let list = ApplicationHoverArea.visibleWindows() else { return true }
+        let dockPIDs = Set(NSRunningApplication.runningApplications(withBundleIdentifier:"com.apple.dock").map(\.processIdentifier))
+        for info in list {
+            guard let pid = info[kCGWindowOwnerPID as String] as? NSNumber,dockPIDs.contains(pid.int32Value),
+                  (info[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                  let bounds = info[kCGWindowBounds as String] as? [String:Any],
+                  let frame = CGRect(dictionaryRepresentation:bounds as CFDictionary) else { continue }
+            if frame.width > 400 && frame.height > 300 { return true }
+        }
+        return false
+    }
+}
 struct HoverWindow {
     let id: UUID
     let edge: WindowEdge
@@ -27,6 +57,10 @@ struct HoverWindow {
     func containsTrigger(_ pointer: CGPoint) -> Bool {
         guard pointer.x >= screen.minX,pointer.x < screen.maxX,
               pointer.y >= screen.minY,pointer.y < screen.maxY else { return false }
+        // Reserve all four corners, including the approach to a hot corner.
+        let atHorizontalEnd = pointer.x < screen.minX+16 || pointer.x >= screen.maxX-16
+        let atVerticalEnd = pointer.y < screen.minY+16 || pointer.y >= screen.maxY-16
+        guard !(atHorizontalEnd && atVerticalEnd) else { return false }
         switch edge {
         case .left,.right:
             guard pointer.y >= max(frame.minY,screen.minY),pointer.y < min(frame.maxY,screen.maxY) else { return false }
@@ -183,6 +217,18 @@ final class HoverController {
     }
     private func tick() {
         guard !suspended else { return }
+        let pointer = mouseInAX()
+        if SystemInterface.isHotCorner(pointer) || SystemInterface.isPresented {
+            // Discard elapsed dwell/leave time. Closing Launchpad must not
+            // immediately replay an old hide or reveal gesture.
+            for (id,window) in windows {
+                var tracker = HoverTracker(); tracker.update(hidden:window.hidden)
+                tracker.rearm = window.containsTrigger(mouseInAX())
+                trackers[id] = tracker
+            }
+            pendingReveals.removeAll(); edgeOwner = nil; edgeConsumed = false
+            return
+        }
         if interactionProvider() {
             wasInteracting = true
             awaitingGeometry.formUnion(windows.keys)
@@ -195,7 +241,6 @@ final class HoverController {
         }
         let now = ProcessInfo.processInfo.systemUptime
         guard now-lastTick >= 1.0/60 else { return }; lastTick = now
-        let pointer = mouseInAX()
         let frontPID = foregroundProvider()
         let candidates = bindingOrder.filter { id in
             !awaitingGeometry.contains(id) && windows[id].map { window in

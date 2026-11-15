@@ -159,6 +159,7 @@ final class BindingStore {
     private let hoverKey = "HoverSettings.v1"
     private let menuBarKey = "MenuBarIconVisible.v1"
     private(set) var menuBarIconVisible = true
+    private(set) var pendingRemoval: (binding: AppBinding,index: Int,expires: Date)?
     var loadError: String?
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -217,5 +218,21 @@ final class BindingStore {
     func setMenuBarIconVisible(_ visible: Bool) {
         defaults.set(visible,forKey:menuBarKey); menuBarIconVisible = visible
     }
-    func remove(_ id: UUID) throws { try save(bindings.filter{$0.id != id}) }
+    func remove(_ id: UUID) throws {
+        guard let index = bindings.firstIndex(where:{$0.id == id}) else { return }
+        let binding = bindings[index]
+        try save(bindings.filter{$0.id != id})
+        pendingRemoval = (binding,index,Date().addingTimeInterval(8))
+    }
+    @discardableResult func undoRemoval() throws -> UUID? {
+        guard let pending = pendingRemoval,pending.expires > Date() else { pendingRemoval = nil; return nil }
+        guard !bindings.contains(where:{$0.bundleID == pending.binding.bundleID}) else {
+            throw PeekError.message(L("此应用已重新添加，无法撤销删除。"))
+        }
+        if let shortcut = pending.binding.shortcut,bindings.contains(where:{$0.shortcut?.matches(shortcut) == true}) {
+            throw PeekError.message(L("原快捷键已被其他绑定使用，无法撤销删除。"))
+        }
+        var next = bindings; next.insert(pending.binding,at:min(pending.index,next.count))
+        try save(next); pendingRemoval = nil; return pending.binding.id
+    }
 }

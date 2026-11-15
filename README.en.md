@@ -70,7 +70,7 @@ Follow Peek's prompt to **System Settings → Privacy & Security → Accessibili
 
 ## Getting started
 
-1. Open Apps and select Add app. The target application must be running with a standard window open.
+1. Open Apps and select Add app. To set up the initial edge trigger, the target application must be running with a standard window open.
 2. Record a shortcut and choose a direction. **Start with Left or Right**; the top edge is an optional experiment.
 3. Press the shortcut to bring the window forward. Press it again while the window is in front to hide it.
 4. In Behavior, adjust Visible strip and the four timing settings. The strip is measured in macOS logical pixels (pt) and applies on the next hide. Zero keeps a minimal 1pt edge to reduce the chance of macOS pulling the window back. Both trigger delays default to zero seconds.
@@ -91,6 +91,10 @@ Hover over the screen's top edge segment corresponding to the original window wi
 Turning it off removes Top from direction menus. Existing top bindings show Disabled and can be changed to another direction. Windows already hidden by Peek can still be restored. Peek does not automatically restore windows you minimized or applications you hid yourself. Click the exclamation mark beside the switch for details.
 
 The red exclamation mark at the far right of an application row explains failed operations, disabled directions, or window position limits.
+
+Bindings, shortcuts, layout, and the last shown or hidden state remain after the target app quits. If you reopen an app that was hidden, Peek hides its window again once it is ready. The window may appear briefly during startup. Pressing the shortcut or entering the saved edge segment takes priority: Peek opens the app if needed, then shows its window. The app controls whether it creates a new window; Peek does not restore closed documents. If the window state is temporarily unknown, Peek keeps the binding for a later retry.
+
+Peek reserves a 16×16pt area at each screen corner for system Hot Corners. Automatic behavior pauses when a large Dock interface, such as Launchpad or Mission Control, is detected. Detection still needs validation across macOS versions.
 
 ### Recommended: assign the target app to All Desktops
 
