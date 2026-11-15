@@ -113,6 +113,6 @@ Choose **简体中文** or **English** in General → Language. Pages, menus, he
 
 New configurations have top edge hiding off and desktop switching on. Updates preserve your existing switch choices.
 
-General also contains launch at login and menu bar visibility. Press **⌘W** to close the main window while shortcuts and automatic behavior continue running. Click Peek's Dock icon to reopen it.
+General also contains launch at login and menu bar visibility. Press **⌘W**, click the close button, or hide Peek to close its settings window and remove its running Dock icon. Shortcuts and automatic behavior keep working; you do not need to quit. Choose Open Peek from the menu bar or reopen Peek.app in Finder to restore settings and the Dock icon. Peek does not change icons you have pinned to the Dock.
 
 **Compatibility:** Desktop switching has been checked between ordinary desktops on a single display. Recall is not guaranteed for every application, full-screen Space, multiple displays, or Stage Manager. Exit full screen before using Peek. The bottom edge uses Visible strip, but some applications require a taller title bar to stay visible. In that case, the status explanation shows the actual exposed height.

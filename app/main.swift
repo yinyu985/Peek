@@ -15,6 +15,7 @@ final class Controller: NSObject,NSApplicationDelegate {
     let hotkeys = GlobalShortcutManager()
     let toggler = WindowController()
     let hover = HoverController()
+    let dockPresence = DockPresenceController()
     var hoverWindows: [UUID:HoverWindow] = [:]
     var hoverDiscoveryTimer: Timer?
     var mainWindow: MainWindowController!
@@ -116,7 +117,11 @@ final class Controller: NSObject,NSApplicationDelegate {
         }
         output("menu_bar_icon_changed",["visible":store.menuBarIconVisible])
     }
-    @objc func openWindow() { guard let mainWindow else { return }; mainWindow.showWindow(nil); mainWindow.window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps:true); output("main_window_opened",["visible":true]) }
+    @objc func openWindow() {
+        guard let window = mainWindow?.window else { return }
+        dockPresence.show(window)
+        output("main_window_opened",["visible":true])
+    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if terminationApproved { return .terminateNow }
         guard !terminationPending else { return .terminateCancel }
@@ -142,6 +147,6 @@ signal(SIGPIPE,SIG_IGN)
 // restore but still prompts after a forced quit. That prompt blocks
 // applicationDidFinishLaunching and made a reopen crash on a nil mainWindow.
 UserDefaults.standard.set(true,forKey:"ApplePersistenceIgnoreState")
-let app = NSApplication.shared; app.setActivationPolicy(.regular)
+let app = NSApplication.shared; app.setActivationPolicy(.accessory)
 app.appearance = NSAppearance(named:.darkAqua)
 let controller = Controller(); app.delegate = controller; app.run()

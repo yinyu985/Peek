@@ -261,14 +261,21 @@ final class WindowController {
     }
     private func select(_ binding: AppBinding,allowOtherSpaces: Bool = false) throws -> ManagedWindow {
         try retireEndedTarget(binding.id)
+        var replaced: ManagedWindow?
         if let existing = windows[binding.id] {
             if axWindowNumber(existing.element) != existing.number || axFrame(existing.element) == nil,
                let refreshed = recoveredElement(existing.recovery) { existing.element = refreshed }
             if existing.recovery.hideStrategy == .appHide,alive(existing.recovery) { return existing }
-            guard alive(existing.recovery),axWindowNumber(existing.element) == existing.number,axFrame(existing.element) != nil else {
+            if alive(existing.recovery),axWindowNumber(existing.element) == existing.number,axFrame(existing.element) != nil { return existing }
+            // A journal owns a particular hidden window. A visible application
+            // binding does not: startup/login windows can disappear while their
+            // WindowServer IDs remain listed. Do not wait for ID destruction.
+            guard records[binding.id] == nil,existing.recovery.hideStrategy == nil,
+                  alive(existing.recovery),
+                  NSRunningApplication(processIdentifier:existing.recovery.pid)?.isHidden == false else {
                 throw PeekError.message(L("原目标窗口已失效或暂时无法读取；请恢复后重新绑定，不会替换成其他窗口。"))
             }
-            return existing
+            replaced = existing // Keep it until a verified replacement is ready.
         }
         // Retry any saved crash recovery before selecting a fresh window.
         if let saved = records[binding.id],alive(saved),saved.windowNumber == nil {
@@ -292,8 +299,21 @@ final class WindowController {
         }
         guard !app.isHidden else { throw PeekError.message(L("请先从 Dock 显示 {0}，再绑定窗口。",binding.name)) }
         let application = AXUIElementCreateApplication(app.processIdentifier); AXUIElementSetMessagingTimeout(application,0.35)
-        let all = (axRead(application,kAXWindowsAttribute) as? [AXUIElement] ?? []).filter {
-            axRead($0,kAXSubroleAttribute) as? String == kAXStandardWindowSubrole && (axRead($0,kAXMinimizedAttribute) as? Bool) == false
+        var candidates = axRead(application,kAXWindowsAttribute) as? [AXUIElement] ?? []
+        for key in [kAXFocusedWindowAttribute,kAXMainWindowAttribute] {
+            if let value = axRead(application,key),CFGetTypeID(value) == AXUIElementGetTypeID(),
+               !candidates.contains(where:{CFEqual($0,value)}) { candidates.append(value as! AXUIElement) }
+        }
+        let all = candidates.filter {
+            var pid: pid_t = 0
+            return AXUIElementGetPid($0,&pid) == .success && pid == app.processIdentifier &&
+                axRead($0,kAXSubroleAttribute) as? String == kAXStandardWindowSubrole &&
+                (axRead($0,kAXMinimizedAttribute) as? Bool) == false && axFrame($0) != nil
+        }
+        if let replaced {
+            guard replaced.recovery.pid == app.processIdentifier,alive(replaced.recovery) else {
+                throw PeekError.message(L("应用身份暂时无法确认，已保留恢复记录，请稍后重试。"))
+            }
         }
         let selected: AXUIElement
         if let title = binding.windowTitle {
@@ -304,7 +324,7 @@ final class WindowController {
             selected = focused as! AXUIElement
         } else if let main = axRead(application,kAXMainWindowAttribute),CFGetTypeID(main) == AXUIElementGetTypeID(),all.contains(where:{CFEqual($0,main)}) {
             selected = main as! AXUIElement
-        } else if let first = all.first { selected = first }
+        } else if replaced == nil,let first = all.first { selected = first }
         else { throw PeekError.message(L("这个应用尚无可管理的普通窗口。")) }
         AXUIElementSetMessagingTimeout(selected,0.25)
         var observedFrame = axFrame(selected)
@@ -331,9 +351,20 @@ final class WindowController {
         let title = axRead(selected,kAXTitleAttribute) as? String ?? ""
         let record = WindowRecovery(bindingID:binding.id,pid:app.processIdentifier,launch:launch.timeIntervalSince1970,bundle:binding.bundleID,title:title,original:frame,processStart:ProcessStart.read(app.processIdentifier),windowNumber:number)
         let managed = ManagedWindow(selected,record,number)
-        let inherit = skipInheritanceOnce.remove(binding.id) == nil
-        managed.inheritsHiddenState = inherit && anchors[binding.id.uuidString]?.hidden == true
-        managed.needsSavedLayout = inherit && anchors[binding.id.uuidString] != nil
+        if let replaced {
+            replaced.generation += 1
+            managed.hasShown = replaced.hasShown
+            managed.inheritsHiddenState = replaced.inheritsHiddenState
+            // This is not an app restart: never replay the startup/login
+            // window's geometry or a completed hide on the new main window.
+            managed.needsSavedLayout = false
+        } else {
+            let inherit = skipInheritanceOnce.remove(binding.id) == nil
+            managed.inheritsHiddenState = inherit && anchors[binding.id.uuidString]?.hidden == true
+            managed.needsSavedLayout = inherit && anchors[binding.id.uuidString] != nil
+        }
+        output("window_target_selected",["binding":binding.id.uuidString,"pid":record.pid,"window":number,
+            "previous_window":replaced?.number ?? 0,"replaced_unowned":replaced != nil])
         windows[binding.id] = managed
         return managed
     }
@@ -1078,7 +1109,13 @@ final class WindowController {
                 if let target = self.windows[binding.id],target.hidden {
                     snapshot = self.applicationSnapshot(target,binding:binding,screens:screens.map { $0.0 },allowOtherSpaces:animation.allowSpaceSwitch)
                 }
-                output("window_toggle",["success":false,"bundle":binding.bundleID,"message":message])
+                let failed = self.windows[binding.id]
+                output("window_toggle",["success":false,"bundle":binding.bundleID,"message":message,
+                    "pid":failed?.recovery.pid ?? 0,"window":failed?.number ?? 0,
+                    "element_window":failed.flatMap { axWindowNumber($0.element) } ?? 0,
+                    "frame_readable":failed.flatMap { axFrame($0.element) } != nil,
+                    "has_recovery":self.records[binding.id] != nil,
+                    "strategy":failed?.recovery.hideStrategy?.rawValue ?? "none"])
             }
             if success,let snapshot {
                 self.windows[binding.id]?.inheritsHiddenState = false
