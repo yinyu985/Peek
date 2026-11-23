@@ -1,0 +1,7 @@
+{
+  // Cloudflare Pages project for the landing page.
+  // "peek" is taken on pages.dev, so this project uses peek-macos.
+  "name": "peek-macos",
+  "compatibility_date": "2026-11-20",
+  "pages_build_output_dir": "./site"
+}

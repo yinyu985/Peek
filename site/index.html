@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Peek 是 macOS 窗口收放工具。用快捷键把窗口收进屏幕边缘，鼠标移回边缘即可展开。">
+<title>Peek — 把窗口收进屏幕边缘</title>
+<link rel="icon" href="assets/icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="shell mast"><a class="brand" href="./"><img src="assets/icon.png" alt="" width="38" height="38">Peek</a><nav aria-label="页面导航"><a href="#install">安装说明</a><a href="https://github.com/yinyu985/Peek">GitHub ↗</a></nav></header>
+<main>
+  <section class="shell hero" aria-labelledby="title">
+    <div class="hero-copy"><div><p class="label">适用于 macOS 的窗口工具</p><h1 id="title">把窗口收进<span>屏幕边缘。</span></h1></div><div class="pitch"><p>按快捷键收起暂时不用的窗口。想用时，再按一次，或把鼠标移回屏幕边缘。</p><a class="button" href="https://github.com/yinyu985/Peek/releases/latest">下载 Peek <span aria-hidden="true">↗</span></a><p class="platform">macOS 13+ · Apple Silicon / Intel</p></div></div>
+    <figure class="demo" aria-labelledby="demo-caption">
+      <div class="stage">
+        <img class="window" src="assets/applications.png" width="1200" height="680" alt="Peek 的真实设置界面：为不同应用设置收起方向与快捷键。" fetchpriority="high">
+        <span class="edge" aria-hidden="true"></span>
+        <kbd class="demo-key" aria-hidden="true">⌃ N</kbd>
+        <svg class="pointer" aria-hidden="true" width="25" height="29" viewBox="0 0 25 29"><path d="M3 2v22l6-5 5 8 4-2-5-8 9-1z" fill="#f4f7ff" stroke="#121a2b" stroke-width="2" stroke-linejoin="round"/></svg>
+      </div>
+      <figcaption class="demo-caption" id="demo-caption"><span><b>01</b> 按快捷键，窗口收进边缘。</span><span><b>02</b> 悬停边缘展开，移开后自动收起。</span></figcaption>
+    </figure>
+  </section>
+  <section class="shell details" aria-labelledby="behavior-title">
+    <figure><img src="assets/behavior.png" width="1200" height="680" loading="lazy" alt="Peek 设置实拍：调整窗口露出宽度、悬停触发和收放时间。"></figure>
+    <div><p class="label">按应用设置</p><h2 id="behavior-title">同一块屏幕，<br>各有各的位置。</h2><ul><li>给每个应用设置不同的快捷键和收起方向。</li><li>调整窗口露出多少、悬停多久才展开。</li><li>只想用快捷键？关闭自动收放即可。</li></ul></div>
+  </section>
+  <section class="shell install" id="install">
+    <div><p class="label">首次使用</p><h2>下载 DMG，拖进应用程序。</h2><p>M 系列 Mac 选 <code>arm64</code>，Intel Mac 选 <code>x86_64</code>。首次运行时，需要在系统设置中给 Peek 授予辅助功能权限，才能移动窗口。</p><p>Peek 尚未经过 Apple 公证。若 macOS 拦截，请确认安装包来自 GitHub Releases，再按安装说明操作。</p></div>
+    <div class="actions"><a class="button" href="https://github.com/yinyu985/Peek/releases/latest">下载最新版 ↗</a><a href="https://github.com/yinyu985/Peek#安装">查看完整安装说明 ↗</a></div>
+  </section>
+</main>
+<footer class="shell foot"><span>Peek · macOS 窗口收放工具</span><a href="https://github.com/yinyu985/Peek/issues">反馈问题 ↗</a></footer>
+<script src="demo.js" defer></script>
+</body>
+</html>
