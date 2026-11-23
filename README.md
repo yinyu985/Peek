@@ -4,7 +4,7 @@
 <h1 align="center">Peek</h1>
 <p align="center"><a href="README.md">简体中文</a> · <a href="README.en.md">English</a></p>
 <p align="center">把暂时不用的窗口收起来，需要时再叫回来。</p>
-<p align="center"><a href="https://peek-macos.pages.dev">官网</a> · <a href="https://github.com/yinyu985/Peek/releases/latest">下载最新版</a></p>
+<p align="center"><a href="https://the-peek.pages.dev">官网</a> · <a href="https://github.com/yinyu985/Peek/releases/latest">下载最新版</a></p>
 
 Peek 是一个轻量的 macOS 窗口收放工具。为应用设置快捷键和收起方向，就能收起窗口，再通过快捷键或屏幕边缘的鼠标悬停唤回。
 

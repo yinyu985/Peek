@@ -4,7 +4,7 @@
 <h1 align="center">Peek</h1>
 <p align="center"><a href="README.md">简体中文</a> · <a href="README.en.md">English</a></p>
 <p align="center">Hide windows you are not using. Bring them back when you need them.</p>
-<p align="center"><a href="https://peek-macos.pages.dev">Website</a> · <a href="https://github.com/yinyu985/Peek/releases/latest">Download</a></p>
+<p align="center"><a href="https://the-peek.pages.dev">Website</a> · <a href="https://github.com/yinyu985/Peek/releases/latest">Download</a></p>
 
 Peek is a lightweight window utility for macOS. Assign an application a shortcut and a screen edge to hide its window, then bring it back with the shortcut or by hovering over its edge of the screen.
 
