@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")"
-version=1.4.17
-build_number=62
+version=1.5.0
+build_number=65
 if [ "${RELEASE_TAG:-v$version}" != "v$version" ]; then
     echo "Release tag must match the app version: v$version" >&2
     exit 1

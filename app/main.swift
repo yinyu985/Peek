@@ -35,6 +35,7 @@ final class Controller: NSObject,NSApplicationDelegate {
             guard let binding = self.store.bindings.first(where:{$0.id == id}) else { return }
             self.toggler.toggle(binding)
         }
+        toggler.bindingProvider = { [weak self] id in self?.store.bindings.first(where:{$0.id == id}) }
         toggler.animationSettings = store.hoverSettings
         hover.configure(store.bindings,settings:store.hoverSettings)
         hover.onInteractionEnded = { [weak self] in self?.refreshHoverTargets() }
@@ -77,13 +78,17 @@ final class Controller: NSObject,NSApplicationDelegate {
         mainWindow.onLanguageChanged = { [weak self] in
             guard let self else { return }
             let frame = self.mainWindow.window?.frame
+            let restoreKeyboardFocus = self.mainWindow.showsKeyboardFocus
             let statuses = self.mainWindow.bindingStatus
             self.mainWindow.close()
             self.makeMainWindow()
             if let frame { self.mainWindow.window?.setFrame(frame,display:false) }
             for (id,status) in statuses { self.mainWindow.setBindingStatus(id,status.0,status.1) }
             self.mainWindow.showGeneral()
-            self.rebuildMenus(); self.openWindow(); self.mainWindow.focusLanguagePicker()
+            self.rebuildMenus(); self.openWindow()
+            if restoreKeyboardFocus {
+                self.mainWindow.setShowsKeyboardFocus(true); self.mainWindow.focusLanguagePicker()
+            }
         }
     }
     private func rebuildMenus() {

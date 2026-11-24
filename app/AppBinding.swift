@@ -52,12 +52,27 @@ enum WindowEdge: String, Codable, CaseIterable {
         return point
     }
 }
+enum BindingTrigger: CaseIterable {
+    case hover, keyboard, both
+
+    var title: String {
+        switch self {
+        case .hover: return L("仅悬停")
+        case .keyboard: return L("仅快捷键")
+        case .both: return L("两者皆可")
+        }
+    }
+}
 struct AppBinding: Codable, Identifiable {
     let id: UUID
     let bundleID: String
     let name: String
     var path: String
     var shortcut: Shortcut?
+    // Missing on older bindings: a saved shortcut used both triggers.
+    var shortcutOnly: Bool?
+    var trigger: BindingTrigger { shortcut == nil ? .hover : (shortcutOnly == true ? .keyboard : .both) }
+    var allowsHover: Bool { trigger != .keyboard }
     var edge: WindowEdge?
     var windowTitle: String?
     var selectedEdge: WindowEdge { edge ?? .top }
@@ -184,13 +199,16 @@ final class BindingStore {
         if let existing = bindings.first(where:{$0.bundleID == item.bundleID}) { return existing.id }
         try save(bindings + [item]); return item.id
     }
-    func setShortcut(_ shortcut: Shortcut?, for id: UUID) throws {
+    func setShortcut(_ shortcut: Shortcut?, for id: UUID, shortcutOnly: Bool? = nil) throws {
         if let shortcut,bindings.contains(where:{$0.id != id && $0.shortcut?.matches(shortcut) == true}) {
             throw PeekError.message(L("这个快捷键已绑定到另一个应用。"))
         }
         var next = bindings
         guard let index = next.firstIndex(where:{$0.id == id}) else { return }
-        next[index].shortcut = shortcut; try save(next)
+        next[index].shortcut = shortcut
+        if shortcut == nil { next[index].shortcutOnly = nil }
+        else if let shortcutOnly { next[index].shortcutOnly = shortcutOnly ? true : nil }
+        try save(next)
     }
     func configure(_ id: UUID, edge: WindowEdge? = nil, windowTitle: String? = nil, changeWindow: Bool = false) throws {
         var next = bindings

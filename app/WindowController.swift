@@ -79,7 +79,7 @@ struct WindowRecovery: Codable {
 private final class ManagedWindow {
     var element: AXUIElement
     var recovery: WindowRecovery
-    let number: CGWindowID
+    var number: CGWindowID
     var hidden = false
     var hasShown = false
     var generation = 0
@@ -122,6 +122,19 @@ final class WindowController {
     var onBindingStatus: ((UUID,String,Bool)->Void)?
     var onPermissionNeeded: (()->Void)?
     var animationSettings = HoverSettings() // Read on main, captured per request.
+    var bindingProvider: ((UUID)->AppBinding?)? // Main queue only.
+    private func allowsRequest(_ binding: AppBinding,source: String) -> Bool {
+        let current: AppBinding
+        if let bindingProvider {
+            guard let saved = bindingProvider(binding.id) else { return false }
+            current = saved
+        } else { current = binding }
+        switch source {
+        case "hotkey": return current.shortcut != nil && current.shortcut == binding.shortcut
+        case "hover": return animationSettings.enabled && current.allowsHover
+        default: return current.shortcut != nil || animationSettings.enabled
+        }
+    }
     var interactionProvider: ()->Bool = { PointerInteraction.isBusy }
     var foregroundProvider: ()->pid_t? = { NSWorkspace.shared.frontmostApplication?.processIdentifier }
     var pointerProvider: ()->CGPoint? = { CGEvent(source:nil)?.location }
@@ -226,6 +239,9 @@ final class WindowController {
         return true
     }
     private func retireEndedTarget(_ id: UUID) throws {
+        // Prefer an application handoff even if WindowServer has already
+        // removed the old ID; otherwise discovery replays the hidden anchor.
+        if let target = windows[id],try adoptVisibleApplicationWindow(target) { return }
         guard let record = windows[id]?.recovery ?? records[id],targetEnded(record) else { return }
         windows.removeValue(forKey:id)
         if records.removeValue(forKey:id) != nil { try persist() }
@@ -234,7 +250,7 @@ final class WindowController {
         let key = snapshot.id.uuidString
         // Offline edge placeholders and newly discovered windows must not
         // overwrite the last confirmed application state before it is applied.
-        guard snapshot.pid != nil,windows[snapshot.id]?.inheritsHiddenState != true else { return }
+        guard !snapshot.recallPending,snapshot.pid != nil,windows[snapshot.id]?.inheritsHiddenState != true else { return }
         if let old = anchors[key],old.screen == snapshot.screen,old.frame == snapshot.frame,old.hidden == snapshot.hidden { return }
         anchors[key] = RecallAnchor(screen:snapshot.screen,frame:snapshot.frame,hidden:snapshot.hidden)
         if let data = try? JSONEncoder().encode(anchors) { anchorDefaults.set(data,forKey:"RecallAnchors.v1") }
@@ -259,6 +275,98 @@ final class WindowController {
         }
         guard done.wait(timeout:.now()+8) == .success else { throw PeekError.message(L("应用打开超时，请稍后重试。")) }
     }
+    // App hide owns application visibility, not the lifetime of a login window.
+    // A visible replacement can complete that ownership without restoring the
+    // old window's geometry. Never use this path for move/minimize recovery.
+    @discardableResult
+    private func adoptVisibleApplicationWindow(_ target: ManagedWindow) throws -> Bool {
+        let old = target.recovery
+        guard old.hideStrategy == .appHide,old.applicationHidden == true,
+              old.windowNumber == target.number,alive(old),!interactionProvider(),
+              !SystemInterface.pausesAutomaticControl else { return false }
+        let epoch = spaceEpoch()
+        let application = AXUIElementCreateApplication(old.pid)
+        AXUIElementSetMessagingTimeout(application,0.25)
+        var replacement: (AXUIElement,CGWindowID,CGRect)?
+        for sample in 0..<3 {
+            guard alive(old),spaceEpoch() == epoch,!interactionProvider(),
+                  NSRunningApplication(processIdentifier:old.pid)?.isHidden == false,
+                  let listed = axRead(application,kAXWindowsAttribute) as? [AXUIElement],
+                  listed.allSatisfy({ axWindowNumber($0) != nil }) else { return false }
+            var candidates: [AXUIElement] = []
+            for key in [kAXFocusedWindowAttribute,kAXMainWindowAttribute] {
+                guard let value = axRead(application,key),CFGetTypeID(value) == AXUIElementGetTypeID() else { continue }
+                candidates.append(value as! AXUIElement)
+            }
+            // A still-published old window is not a confirmed replacement.
+            guard !(listed+candidates).contains(where:{ axWindowNumber($0) == target.number }),
+                  let visible = CGWindowListCopyWindowInfo([.optionOnScreenOnly,.excludeDesktopElements],kCGNullWindowID) as? [[String:Any]],
+                  !visible.contains(where:{ ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == target.number }) else { return false }
+            let verified = candidates.compactMap { element -> (AXUIElement,CGWindowID,CGRect)? in
+                AXUIElementSetMessagingTimeout(element,0.25)
+                var pid: pid_t = 0
+                guard AXUIElementGetPid(element,&pid) == .success,pid == old.pid,
+                      axRead(element,kAXSubroleAttribute) as? String == kAXStandardWindowSubrole,
+                      axRead(element,kAXMinimizedAttribute) as? Bool == false,
+                      axRead(element,"AXFullScreen") as? Bool != true,
+                      let number = axWindowNumber(element),let frame = axFrame(element),
+                      WindowSpaces.membership(number) == .current,
+                      let info = visible.first(where:{ ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == number &&
+                          ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == old.pid }),
+                      let bounds = info[kCGWindowBounds as String] as? [String:Any],
+                      let actual = CGRect(dictionaryRepresentation:bounds as CFDictionary),
+                      near(frame.origin,actual.origin),sameSize(frame.size,actual.size) else { return nil }
+                return (element,number,frame)
+            }.first
+            guard let verified else { return false }
+            if let previous = replacement {
+                guard previous.1 == verified.1,near(previous.2.origin,verified.2.origin),sameSize(previous.2.size,verified.2.size) else { return false }
+            }
+            replacement = verified
+            if sample < 2 { Thread.sleep(forTimeInterval:0.025) }
+        }
+        guard let (element,number,frame) = replacement,alive(old),spaceEpoch() == epoch,
+              !interactionProvider(),!SystemInterface.pausesAutomaticControl else { return false }
+        let saved = records.removeValue(forKey:old.bindingID)
+        do { try persist() } catch { records[old.bindingID] = saved; throw error }
+        target.element = element; target.number = number
+        target.recovery = WindowRecovery(bindingID:old.bindingID,pid:old.pid,launch:old.launch,bundle:old.bundle,
+            title:axRead(element,kAXTitleAttribute) as? String ?? "",original:frame,
+            processStart:old.processStart,windowNumber:number)
+        target.hidden = false; target.hasShown = true; target.generation += 1
+        target.inheritsHiddenState = false; target.needsSavedLayout = false
+        target.recalledWith = nil; target.tuckedOrigin = nil; target.revealWidth = 0
+        output("application_window_replaced",["binding":old.bindingID.uuidString,"pid":old.pid,
+            "previous_window":old.windowNumber ?? 0,"window":number,"reason":"visible_application_replaced_hidden_target"])
+        return true
+    }
+    // Reattach ownership, not visibility. This is read-only with respect to the
+    // application: hidden AXWindows need not be published until explicit recall.
+    private func reattachApplicationRecovery(_ binding: AppBinding) throws -> ManagedWindow? {
+        guard windows[binding.id] == nil,let saved = records[binding.id],saved.bundle == binding.bundleID,
+              saved.hideStrategy == .appHide,saved.applicationHidden == true,
+              alive(saved),let number = saved.windowNumber else { return nil }
+        let target = ManagedWindow(recoveredElement(saved) ?? AXUIElementCreateApplication(saved.pid),saved,number)
+        target.hidden = true; windows[binding.id] = target
+        try adoptVisibleApplicationWindow(target)
+        output("recovery_reattached",["binding":binding.id.uuidString,"pid":saved.pid,"window":number,"strategy":"appHide"])
+        return target
+    }
+    // A recovery journal is also a retry entry. Unknown visibility is not
+    // hidden state and must not overwrite the last confirmed anchor. Only an
+    // explicit Hover/hotkey request may perform the pending recovery writes.
+    private func pendingRecoverySnapshot(_ binding: AppBinding,screens: [CGRect],allowOtherSpaces: Bool) -> HoverWindow? {
+        guard let record = records[binding.id],record.bundle == binding.bundleID,
+              alive(record),let number = record.windowNumber else { return nil }
+        let membership = record.hideStrategy == .appHide ? applicationMembership(record):WindowSpaces.membership(number)
+        guard membership == .current || (allowOtherSpaces && membership == .other),
+              let screen = screens.max(by: { a,b in
+                  let aa = a.intersection(record.original),bb = b.intersection(record.original)
+                  return (aa.isNull ? 0:aa.width*aa.height) < (bb.isNull ? 0:bb.width*bb.height)
+              }),screen.intersects(record.original) else { return nil }
+        return HoverWindow(id:binding.id,edge:binding.selectedEdge,screen:screen,frame:record.original,hidden:false,
+            pid:record.pid,onCurrentSpace:membership == .current,recallPending:true)
+    }
     private func select(_ binding: AppBinding,allowOtherSpaces: Bool = false) throws -> ManagedWindow {
         try retireEndedTarget(binding.id)
         var replaced: ManagedWindow?
@@ -281,16 +389,7 @@ final class WindowController {
         if let saved = records[binding.id],alive(saved),saved.windowNumber == nil {
             throw PeekError.message(L("旧恢复记录缺少窗口 ID。请手动恢复窗口，退出并重开目标应用后重试；不会按标题猜测窗口。"))
         }
-        // Reattach an owned app hide without requiring hidden AXWindows first.
-        // The application element is only a placeholder: explicit recall must
-        // activate, then replace it with the exact journaled window ID before
-        // any window action. Discovery skips detached recovery records.
-        if let saved = records[binding.id],saved.hideStrategy == .appHide,
-           saved.applicationHidden == true,alive(saved),let number = saved.windowNumber {
-            let target = ManagedWindow(recoveredElement(saved) ?? AXUIElementCreateApplication(saved.pid),saved,number)
-            target.hidden = true; windows[binding.id] = target
-            return target
-        }
+        if let target = try reattachApplicationRecovery(binding) { return target }
         guard records[binding.id] == nil || restoreRecord(binding.id,allowSpaceSwitch:allowOtherSpaces) else {
             throw PeekError.message(L("窗口尚未恢复，请打开目标应用后再按快捷键重试。"))
         }
@@ -391,6 +490,7 @@ final class WindowController {
             throw PeekError.message(L("无法确认原窗口的隐藏记录，已保留恢复信息。"))
         }
         let app = try application(target.recovery)
+        if try adoptVisibleApplicationWindow(target) { return }
         // An external recall may already have completed. Do not queue another
         // reopen event that could arrive after the user's next hide request.
         if !app.isHidden,alive(target.recovery),
@@ -437,6 +537,7 @@ final class WindowController {
         issue(method)
         repeat {
             if activate { try respectUserInteraction() }
+            if try adoptVisibleApplicationWindow(target) { return }
             if !app.isHidden,alive(target.recovery),
                onScreenWindows().contains(where:{($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == target.number}) {
                 var ready = axWindowNumber(target.element) == target.number && axFrame(target.element) != nil
@@ -574,6 +675,7 @@ final class WindowController {
     private func restoreLegacyOrHiddenApplication(_ target: ManagedWindow) -> Bool {
         guard alive(target.recovery) else { return processIdentity(target.recovery) == .gone }
         if target.recovery.hideStrategy == .appHide {
+            if (try? adoptVisibleApplicationWindow(target)) == true { return true }
             guard applicationMembership(target.recovery) == .current else { return false }
             do { try unhideOwnedApplication(target) } catch { return false }
             return true // Hiding did not alter geometry.
@@ -595,6 +697,14 @@ final class WindowController {
     private func applicationSnapshot(_ target: ManagedWindow,binding: AppBinding,screens: [CGRect],allowOtherSpaces: Bool) -> HoverWindow? {
         guard alive(target.recovery),
               target.recovery.hideStrategy == .appHide else { return nil }
+        // Refresh must also finish app-hide ownership after login/main-window
+        // replacement, otherwise Hover keeps waiting on the old hidden target.
+        if (try? adoptVisibleApplicationWindow(target)) == true {
+            let frame = target.recovery.original
+            guard let screen = screens.first(where:{ $0.intersects(frame) }) else { return nil }
+            return HoverWindow(id:binding.id,edge:binding.selectedEdge,screen:screen,frame:frame,hidden:false,
+                pid:target.recovery.pid,onCurrentSpace:true)
+        }
         let membership = applicationMembership(target.recovery)
         guard membership == .current || (allowOtherSpaces && membership == .other) else { return nil }
         guard let app = DispatchQueue.main.sync(execute:{ NSRunningApplication(processIdentifier:target.recovery.pid) }) else { return nil }
@@ -689,11 +799,21 @@ final class WindowController {
                         continue
                     }
                 }
-                // Automatic recovery owns saved records; discovery never restores.
-                if self.records[binding.id] != nil && self.windows[binding.id] == nil { continue }
+                // Startup restoration can fail once and leave only a journal.
+                // Reconcile on every discovery pass without unhiding/focusing.
+                if self.records[binding.id] != nil && self.windows[binding.id] == nil {
+                    _ = try? self.reattachApplicationRecovery(binding)
+                    if self.windows[binding.id] == nil {
+                        if let state = self.pendingRecoverySnapshot(binding,screens:screens,allowOtherSpaces:allowSpaceSwitch) {
+                            snapshots.append(state)
+                        } else { missing.append(binding.id) }
+                        continue
+                    }
+                }
                 if let target = self.windows[binding.id],target.hidden,
                    target.recovery.hideStrategy == .appHide {
-                    if let state = self.applicationSnapshot(target,binding:binding,screens:screens,allowOtherSpaces:allowSpaceSwitch) {
+                    if let state = self.applicationSnapshot(target,binding:binding,screens:screens,allowOtherSpaces:allowSpaceSwitch)
+                        ?? self.pendingRecoverySnapshot(binding,screens:screens,allowOtherSpaces:allowSpaceSwitch) {
                         snapshots.append(state)
                     } else { missing.append(binding.id) }
                     continue
@@ -756,7 +876,7 @@ final class WindowController {
     func setVisible(_ show: Bool,binding: AppBinding) { request(binding,show:show,source:"hover") }
     private func request(_ binding: AppBinding,show: Bool?,source: String) {
         output("window_request",["binding":binding.id.uuidString,"bundle":binding.bundleID,"source":source,"intent":show.map{$0 ? "show":"hide"} ?? "toggle"])
-        guard !quitting,!detachedIDs.contains(binding.id) else { return }
+        guard !quitting,!detachedIDs.contains(binding.id),allowsRequest(binding,source:source) else { return }
         if source != "hotkey",SystemInterface.pausesAutomaticControl { return }
         if source == "lifecycle",binding.selectedEdge == .top,!animationSettings.topEnabled { return }
         guard AXIsProcessTrusted() else { onPermissionNeeded?(); return }
@@ -777,6 +897,14 @@ final class WindowController {
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let animation = animationSettings
         worker.async {
+            // A request can wait behind discovery or another window's animation.
+            guard DispatchQueue.main.sync(execute:{ self.allowsRequest(binding,source:source) }) else {
+                DispatchQueue.main.async {
+                    self.busyIDs.remove(binding.id)
+                    self.pendingToggles.remove(binding.id); self.pendingReveals.remove(binding.id)
+                }
+                return
+            }
             var message = ""; var success = false; var mutated = false; var snapshot: HoverWindow?
             var mutationEpoch: Int?
             self.automaticRequest = source != "hotkey"
@@ -804,6 +932,9 @@ final class WindowController {
                 let show = recalled ? true:show
                 let target = try self.select(binding,allowOtherSpaces:animation.allowSpaceSwitch)
                 if source != "lifecycle" { target.inheritsHiddenState = false }
+                // App hide never changes geometry, including the first login
+                // window published during launch. Use the application's layout.
+                if binding.selectedEdge == .top,animation.topHideMode == .appHide { target.needsSavedLayout = false }
                 if target.needsSavedLayout,WindowSpaces.membership(target.number) == .current,
                    let saved = self.anchors[binding.id.uuidString],screens.contains(where:{$0.0 == saved.screen}),
                    axRead(target.element,"AXFullScreen") as? Bool != true {
@@ -1109,6 +1240,9 @@ final class WindowController {
                 if let target = self.windows[binding.id],target.hidden {
                     snapshot = self.applicationSnapshot(target,binding:binding,screens:screens.map { $0.0 },allowOtherSpaces:animation.allowSpaceSwitch)
                 }
+                if snapshot == nil {
+                    snapshot = self.pendingRecoverySnapshot(binding,screens:screens.map { $0.0 },allowOtherSpaces:animation.allowSpaceSwitch)
+                }
                 let failed = self.windows[binding.id]
                 output("window_toggle",["success":false,"bundle":binding.bundleID,"message":message,
                     "pid":failed?.recovery.pid ?? 0,"window":failed?.number ?? 0,
@@ -1222,18 +1356,16 @@ final class WindowController {
             guard let number = record.windowNumber else {
                 output("recovery_identity_missing",["binding":id.uuidString]); return false
             }
+            let target: ManagedWindow
             if record.hideStrategy == .appHide {
-                guard alive(record),applicationMembership(record) == .current,
-                      let app = NSRunningApplication(processIdentifier:record.pid) else { return false }
-                if app.isHidden {
-                    guard record.applicationHidden == true else { return false }
-                    _ = app.unhide()
-                    for _ in 0..<20 where app.isHidden { Thread.sleep(forTimeInterval:0.025) }
-                    guard !app.isHidden else { return false }
-                }
+                // A detached journal must use the same application handoff as
+                // live management, without activating on quit/delete/startup.
+                target = ManagedWindow(recoveredElement(record) ?? AXUIElementCreateApplication(record.pid),record,number)
+            } else {
+                guard let element = recoveredElement(record) else { return false }
+                target = ManagedWindow(element,record,number)
             }
-            guard let element = recoveredElement(record) else { return false }
-            let target = ManagedWindow(element,record,number); target.hidden = true
+            target.hidden = true
             guard restore(target,allowSpaceSwitch:allowSpaceSwitch) else { return false }
         }
         let previousWindow = windows.removeValue(forKey:id),previousRecord = records.removeValue(forKey:id)

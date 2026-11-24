@@ -21,12 +21,14 @@ private enum Ink {
     static let hi = NSColor(srgbRed:0.902,green:0.925,blue:0.973,alpha:1)
     static let mid = NSColor(srgbRed:0.92,green:0.947,blue:1,alpha:0.62)
     static let low = NSColor(srgbRed:0.92,green:0.947,blue:1,alpha:0.34)
+    static func controlBorder(enabled: Bool) -> NSColor { accent.withAlphaComponent(enabled ? 0.40:0.22) }
 }
-private func drawKeyboardFocus(_ control: NSControl) {
-    guard control.isEnabled, control.window?.isKeyWindow == true,
+private func drawKeyboardFocus(_ control: NSControl,color: NSColor = Ink.accent,lineWidth: CGFloat = 2) {
+    guard (control.window as? SettingsWindow)?.showsKeyboardFocus == true,
+          control.isEnabled, control.window?.isKeyWindow == true,
           control.window?.firstResponder === control else { return }
     let ring = NSBezierPath(roundedRect:control.bounds.insetBy(dx:1.5,dy:1.5),xRadius:5,yRadius:5)
-    Ink.accent.setStroke(); ring.lineWidth = 2; ring.stroke()
+    color.setStroke(); ring.lineWidth = lineWidth; ring.stroke()
 }
 private final class NumericTextField: NSTextField {
     override func becomeFirstResponder() -> Bool {
@@ -46,10 +48,39 @@ private enum Layout {
 // These columns fill a 428pt card, including its 10pt side insets.
 // Keep slots even when their content is empty or hidden.
 private enum ApplicationRowLayout {
-    static let widths: [CGFloat] = [24,160,72,96,14,14]
-    static let gaps: [CGFloat] = [8,6,6,4,4]
+    static let widths: [CGFloat] = [24,100,72,84,66,14,14]
+    static let gaps: [CGFloat] = [8,6,6,6,4,4]
     static let inset: CGFloat = 10
     static let trailingInset: CGFloat = 10
+}
+// Column captions for the app list. Each caption aligns to the text inside its
+// control, not to the control frame, so the label sits over what it names.
+private final class ApplicationColumnHeader: NSView {
+    private let captions: [(column: Int,title: String,centered: Bool)]
+    init(captions: [(column: Int,title: String,centered: Bool)]) {
+        self.captions = captions
+        super.init(frame:.zero)
+        setAccessibilityElement(false)
+    }
+    required init?(coder: NSCoder) { nil }
+    override var isOpaque: Bool { false }
+    private func leading(_ column: Int) -> CGFloat {
+        var x = ApplicationRowLayout.inset
+        for index in 0..<column { x += ApplicationRowLayout.widths[index]+ApplicationRowLayout.gaps[index] }
+        return x
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        let font = NSFont.systemFont(ofSize:11,weight:.medium)
+        let attrs: [NSAttributedString.Key:Any] = [.font:font,.foregroundColor:Ink.low]
+        let height = ("Ag" as NSString).size(withAttributes:attrs).height
+        for caption in captions {
+            let column = leading(caption.column)
+            let width = ApplicationRowLayout.widths[caption.column]
+            let text = caption.title as NSString
+            let x = caption.centered ? column+(width-text.size(withAttributes:attrs).width)/2:column+PickerLayout.inset
+            text.draw(in:NSRect(x:x,y:bounds.midY-height/2,width:width,height:height),withAttributes:attrs)
+        }
+    }
 }
 // AppKit's default text/button alignment insets otherwise extend their frames
 // beyond the declared column widths.
@@ -58,6 +89,26 @@ private final class ApplicationNameField: NSTextField {
 }
 private final class ApplicationStatusButton: NSButton {
     override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsets(top:0,left:0,bottom:0,right:0) }
+}
+private final class SettingsWindow: NSWindow {
+    // Focus rings in this app are a keyboard affordance only. A mouse visit
+    // must not leave a ring behind on the control it focused.
+    var showsKeyboardFocus = false {
+        didSet {
+            if oldValue != showsKeyboardFocus { (firstResponder as? NSControl)?.needsDisplay = true }
+        }
+    }
+    func trackFocusInput(_ event: NSEvent) {
+        switch event.type {
+        case .keyDown: showsKeyboardFocus = true
+        case .leftMouseDown,.rightMouseDown,.otherMouseDown,.scrollWheel: showsKeyboardFocus = false
+        default: break
+        }
+    }
+    override func sendEvent(_ event: NSEvent) {
+        trackFocusInput(event)
+        super.sendEvent(event)
+    }
 }
 private final class WindowSurface: NSView {
     override var isOpaque: Bool { true }
@@ -116,8 +167,11 @@ private class ActionButton: NSButton {
     var iconSize: CGFloat = 12
     var isNavigation = false
     var isChip = false
+    // One primary action per page; only its text uses the accent color.
+    var isPrimary = false
+    var isRecordingShortcut = false { didSet { needsDisplay = true } }
     var hasError = false { didSet { needsDisplay = true } }
-    fileprivate var hovered = false
+    private var hovered = false
     var actionBlock: (()->Void)?
     init(_ title: String, action: @escaping ()->Void) {
         super.init(frame:.zero); self.title = title; isBordered = false; focusRingType = .none
@@ -144,14 +198,18 @@ private class ActionButton: NSButton {
             NSGradient(colors:[Ink.accent.withAlphaComponent(0.16),Ink.accent.withAlphaComponent(0.05)])?.draw(in:pill,angle:-90)
             Ink.accent.withAlphaComponent(0.38).setStroke(); pill.lineWidth = 1; pill.stroke()
         } else if isChip {
+            // Chips, dropdowns and steppers share one surface: neutral fill, we
+            // only draw a border, so a row of controls reads as one family.
             let pill = NSBezierPath(roundedRect:NSRect(x:0.5,y:0.5,width:bounds.width-1,height:bounds.height-1),xRadius:radius,yRadius:radius)
-            Ink.accent.withAlphaComponent(!isEnabled ? 0.04:isHighlighted || disclosureExpanded ? 0.18:hovered ? 0.14:0.10).setFill(); pill.fill()
-            (hasError ? NSColor.systemRed:Ink.accent.withAlphaComponent(isEnabled ? 0.45:0.22)).setStroke(); pill.lineWidth = 1; pill.stroke()
+            NSColor.white.withAlphaComponent(!isEnabled ? 0.02:hovered || isHighlighted ? 0.07:0.05).setFill(); pill.fill()
+            (isRecordingShortcut || hasError ? NSColor.systemRed:Ink.controlBorder(enabled:isEnabled)).setStroke()
+            pill.lineWidth = isRecordingShortcut ? 1.5:1; pill.stroke()
         }
         let color: NSColor
-        if !isEnabled { color = Ink.low }
+        if isRecordingShortcut || hasError { color = .systemRed }
+        else if !isEnabled { color = Ink.low }
         else if selected { color = Ink.hi }
-        else if isChip { color = hovered || isHighlighted ? Ink.hi : Ink.accentText }
+        else if isChip { color = isPrimary ? (hovered || isHighlighted ? Ink.hi : Ink.accentText) : Ink.hi }
         else { color = hovered || isHighlighted ? Ink.hi : Ink.mid }
         let size = font?.pointSize ?? 12
         let typeface = selected ? NSFont.systemFont(ofSize:size,weight:.semibold) : font ?? NSFont.systemFont(ofSize:size)
@@ -169,7 +227,7 @@ private class ActionButton: NSButton {
         var textAttrs = attrs; textAttrs[.paragraphStyle] = paragraph
         let textX = alignment == .left ? x+imageWidth:4+imageWidth
         (title as NSString).draw(in:NSRect(x:textX,y:bounds.midY-textSize.height/2,width:max(0,bounds.width-textX-4),height:textSize.height),withAttributes:textAttrs)
-        drawKeyboardFocus(self)
+        if !isRecordingShortcut { drawKeyboardFocus(self) }
     }
     override func becomeFirstResponder() -> Bool { let result = super.becomeFirstResponder(); needsDisplay = true; return result }
     override func resignFirstResponder() -> Bool { let result = super.resignFirstResponder(); needsDisplay = true; return result }
@@ -184,7 +242,7 @@ private class ActionButton: NSButton {
         actionBlock?()
     }
 }
-// Both selectors share the same surface, rows and anchor geometry.
+// All dropdowns share the same surface, rows and anchor geometry.
 private final class PickerSurface: NSView {
     override var isOpaque: Bool { false }
     override func draw(_ dirtyRect: NSRect) {
@@ -194,36 +252,25 @@ private final class PickerSurface: NSView {
     }
 }
 private final class PickerRow: NSButton {
-    var hovered = false
-    var keyboardHighlighted = false { didSet { needsDisplay = true } }
-    var selectedEdge = false
+    var keyboardFocused = false { didSet { needsDisplay = true } }
+    private let selected: Bool
     override var isOpaque: Bool { false }
     init(_ title: String,selected: Bool) {
-        super.init(frame:.zero); self.title = title; selectedEdge = selected
+        self.selected = selected
+        super.init(frame:.zero); self.title = title
         isBordered = false; focusRingType = .none; setButtonType(.momentaryChange)
         font = .systemFont(ofSize:12)
     }
     required init?(coder: NSCoder) { nil }
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        for area in trackingAreas { removeTrackingArea(area) }
-        addTrackingArea(NSTrackingArea(rect:.zero,options:[.mouseEnteredAndExited,.activeAlways,.inVisibleRect],owner:self,userInfo:nil))
-    }
-    override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
-    override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
     override func draw(_ dirtyRect: NSRect) {
-        if hovered || selectedEdge || keyboardHighlighted {
-            let pill = NSBezierPath(roundedRect:bounds.insetBy(dx:PickerLayout.padding,dy:0),xRadius:4,yRadius:4)
-            (hovered || keyboardHighlighted ? Ink.accent.withAlphaComponent(0.14):Ink.accent.withAlphaComponent(0.08)).setFill(); pill.fill()
-        }
-        PickerLayout.drawTitle(title,in:bounds,color:selectedEdge || hovered || keyboardHighlighted ? Ink.hi:Ink.mid)
-        if selectedEdge {
+        PickerLayout.drawTitle(title,in:bounds,color:Ink.hi)
+        if selected {
             let slot = PickerLayout.indicatorRect(in:bounds)
-            Ink.accent.setFill(); NSBezierPath(ovalIn:NSRect(x:slot.midX-2,y:slot.midY-2,width:4,height:4)).fill()
+            Ink.mid.setFill(); NSBezierPath(ovalIn:NSRect(x:slot.midX-2,y:slot.midY-2,width:4,height:4)).fill()
         }
-        if keyboardHighlighted {
+        if keyboardFocused {
             let ring = NSBezierPath(roundedRect:bounds.insetBy(dx:PickerLayout.padding+0.5,dy:0.5),xRadius:4,yRadius:4)
-            Ink.accent.setStroke(); ring.lineWidth = 1; ring.stroke()
+            Ink.mid.setStroke(); ring.lineWidth = 1; ring.stroke()
         }
     }
 }
@@ -234,10 +281,10 @@ private final class NumericFieldBox: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let path = NSBezierPath(roundedRect:NSRect(x:0.5,y:0.5,width:bounds.width-1,height:bounds.height-1),xRadius:6,yRadius:6)
         NSColor.white.withAlphaComponent(0.05).setFill(); path.fill()
-        NSColor.white.withAlphaComponent(0.14).setStroke(); path.lineWidth = 1; path.stroke()
-        if let field = subviews.first as? NSTextField, field.currentEditor() != nil {
-            Ink.accent.setStroke(); path.lineWidth = 2; path.stroke()
-        }
+        let field = subviews.first as? NSTextField
+        let editing = field?.currentEditor() != nil
+        (editing ? Ink.accent:Ink.controlBorder(enabled:field?.isEnabled == true)).setStroke()
+        path.lineWidth = editing ? 2:1; path.stroke()
     }
 }
 private final class StepGlyphButton: NSButton {
@@ -264,7 +311,7 @@ private final class StepGlyphButton: NSButton {
     override func draw(_ dirtyRect: NSRect) {
         let path = NSBezierPath(roundedRect:NSRect(x:1,y:1,width:bounds.width-2,height:bounds.height-2),xRadius:6,yRadius:6)
         NSColor.white.withAlphaComponent(hovered || isHighlighted ? 0.12:0.06).setFill(); path.fill()
-        NSColor.white.withAlphaComponent(0.10).setStroke(); path.lineWidth = 1; path.stroke()
+        Ink.controlBorder(enabled:isEnabled).setStroke(); path.lineWidth = 1; path.stroke()
         let ink = !isEnabled ? Ink.low:(hovered || isHighlighted ? Ink.hi:Ink.mid)
         ink.setStroke()
         let glyph = NSBezierPath(); glyph.lineWidth = 1.4; glyph.lineCapStyle = .round
@@ -311,11 +358,10 @@ private enum NumericSetting: String, CaseIterable {
 private final class DropdownButton: ActionButton {
     override var showsDisclosure: Bool { true }
     override func draw(_ dirtyRect: NSRect) {
-        let active = isEnabled && (hovered || isHighlighted || disclosureExpanded)
         let surface = NSBezierPath(roundedRect:bounds.insetBy(dx:0.5,dy:0.5),xRadius:5,yRadius:5)
-        Ink.accent.withAlphaComponent(!isEnabled ? 0.04:active ? 0.14:0.08).setFill(); surface.fill()
-        Ink.accent.withAlphaComponent(!isEnabled ? 0.22:active ? 0.65:0.4).setStroke(); surface.lineWidth = 1; surface.stroke()
-        let color = !isEnabled ? Ink.low:active ? Ink.hi:Ink.accentText
+        NSColor.white.withAlphaComponent(isEnabled ? 0.05:0.02).setFill(); surface.fill()
+        Ink.controlBorder(enabled:isEnabled).setStroke(); surface.lineWidth = 1; surface.stroke()
+        let color = isEnabled ? Ink.hi:Ink.low
         PickerLayout.drawTitle(title,in:bounds,color:color)
         let slot = PickerLayout.indicatorRect(in:bounds)
         let direction: CGFloat = (isFlipped ? 1:-1) * (disclosureExpanded ? -1:1)
@@ -323,7 +369,7 @@ private final class DropdownButton: ActionButton {
         arrow.move(to:NSPoint(x:slot.minX,y:slot.midY-direction))
         arrow.line(to:NSPoint(x:slot.midX,y:slot.midY+2*direction))
         arrow.line(to:NSPoint(x:slot.maxX,y:slot.midY-direction)); color.setStroke(); arrow.stroke()
-        drawKeyboardFocus(self)
+        if !disclosureExpanded { drawKeyboardFocus(self,color:Ink.mid,lineWidth:1) }
     }
 }
 final class MainWindowController: NSWindowController, NSWindowDelegate {
@@ -334,6 +380,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let generalPage = NSView()
     private let aboutPage = NSView()
     private let rows = TopAlignedStack()
+    private let columnHeader = ApplicationColumnHeader(captions:[
+        (2,L("隐藏位置"),false),(3,L("触发方式"),false),(4,L("快捷键"),true)
+    ])
     private let settingsRows = TopAlignedStack()
     private let generalRows = TopAlignedStack()
     private let emptyState = TopAlignedStack()
@@ -353,6 +402,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private var recorderButton: ActionButton?
     private var shortcutButtons: [UUID:ActionButton] = [:]
     private var directionButtons: [UUID:DropdownButton] = [:]
+    private var triggerButtons: [UUID:DropdownButton] = [:]
     private var statusButtons: [UUID:NSButton] = [:]
     private var recordingTimer: Timer?
     private var recordingPulse = false
@@ -376,9 +426,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private var recordingID: UUID?
     private(set) var lastPanel: NSOpenPanel?
     private var sections: [NSView] { [mainPage,settingsPage,generalPage,aboutPage] }
+    var showsKeyboardFocus: Bool { (window as? SettingsWindow)?.showsKeyboardFocus == true }
     init(store: BindingStore,hotkeys: GlobalShortcutManager) {
         self.store = store; self.hotkeys = hotkeys
-        let window = NSWindow(contentRect:NSRect(x:0,y:0,width:600,height:340),styleMask:[.titled,.closable,.miniaturizable,.fullSizeContentView],backing:.buffered,defer:false)
+        let window = SettingsWindow(contentRect:NSRect(x:0,y:0,width:600,height:340),styleMask:[.titled,.closable,.miniaturizable,.fullSizeContentView],backing:.buffered,defer:false)
         window.contentView = WindowSurface(frame:NSRect(x:0,y:0,width:600,height:340))
         window.title = "Peek"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
         window.appearance = NSAppearance(named:.darkAqua)
@@ -457,7 +508,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let add = ActionButton(L("新增应用")) { [weak self] in self?.addApplication() }
         add.image = NSImage(systemSymbolName:"plus",accessibilityDescription:nil)
         add.keyEquivalent = "n"; add.keyEquivalentModifierMask = .command
-        add.isChip = true; add.setContentCompressionResistancePriority(.required,for:.horizontal)
+        add.isChip = true; add.isPrimary = true; add.setContentCompressionResistancePriority(.required,for:.horizontal)
         add.setAccessibilityLabel(L("新增应用"))
         add.widthAnchor.constraint(greaterThanOrEqualToConstant:96).isActive = true
         let header = NSStackView(views:[label(L("应用"),20,.semibold),NSView(),add]); header.orientation = .horizontal
@@ -468,12 +519,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         permissionButton.isChip = true
         permissionButton.isHidden = AXIsProcessTrusted()
         let emptyTitle = label(L("尚未添加应用"),14,.medium); emptyTitle.textColor = Ink.hi
-        let emptyHelp = NSTextField(wrappingLabelWithString:L("点击“新增应用”，设置快捷键和收起方向。"))
+        let emptyHelp = NSTextField(wrappingLabelWithString:L("点击“新增应用”，选择隐藏位置和触发方式。"))
         emptyHelp.font = .systemFont(ofSize:12); emptyHelp.textColor = Ink.mid
         emptyState.orientation = .vertical; emptyState.alignment = .leading; emptyState.spacing = 8
         emptyState.addArrangedSubview(emptyTitle); emptyState.addArrangedSubview(emptyHelp)
         undoNotice.orientation = .vertical; undoNotice.alignment = .leading; undoNotice.spacing = 4
-        buildSection(mainPage,views:[header,emptyState,rows,undoNotice,permissionButton])
+        NSLayoutConstraint.activate([columnHeader.heightAnchor.constraint(equalToConstant:16)])
+        buildSection(mainPage,views:[header,columnHeader,emptyState,rows,undoNotice,permissionButton])
+        // The captions belong to the list: keep them close to the first card.
+        (columnHeader.superview as? NSStackView)?.setCustomSpacing(6,after:columnHeader)
         buildSection(settingsPage,views:[label(L("收放"),20,.semibold),settingsRows])
         buildSection(generalPage,views:[label(L("通用"),20,.semibold),settingsCard(generalRows)])
         let version = Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "—"
@@ -539,6 +593,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     @objc func showApps() { navigate(to:0) }
     @objc func showSettings() { navigate(to:1) }
     @objc func showGeneral() { reloadGeneral(); navigate(to:2) }
+    func setShowsKeyboardFocus(_ value: Bool) { (window as? SettingsWindow)?.showsKeyboardFocus = value }
     func focusLanguagePicker() {
         if let button = generalRows.arrangedSubviews.first?.subviews.compactMap({ $0 as? DropdownButton }).first {
             window?.makeFirstResponder(button)
@@ -577,7 +632,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
     }
     @objc private func showTopHelp(_ sender: NSButton) {
-        showHelp(L("macOS 和许多应用会限制窗口移出屏幕顶部。\n\n最小化窗口：只收起绑定窗口。隐藏整个应用：同一应用的所有窗口一起隐藏，恢复时将绑定窗口置前，保留原位置和尺寸。\n\n两种方式都通过顶部对应区段或快捷键恢复，鼠标移开后按离开延迟收起。停留和离开延迟有效；过渡由 macOS 控制，不使用 Peek 的展开、收起时长。\n\n关闭后，方向菜单移除“顶部”，已有顶部绑定暂停收起，已收起的窗口仍可召回。"),from:sender)
+        showHelp(L("macOS 和许多应用会限制窗口移出屏幕顶部。\n\n最小化窗口：只收起绑定窗口。隐藏整个应用：同一应用的所有窗口一起隐藏，恢复时将绑定窗口置前，保留原位置和尺寸。\n\n两种方式都通过顶部对应区段或快捷键恢复，鼠标移开后按离开延迟收起。停留和离开延迟有效；过渡由 macOS 控制，不使用 Peek 的展开、收起时长。\n\n关闭后，位置菜单移除“顶部”，已有顶部绑定暂停收起，已收起的窗口仍可召回。"),from:sender)
     }
     @objc private func showTopModeHelp(_ sender: NSButton) {
         showHelp(L("隐藏整个应用会同时隐藏该应用的所有窗口。\n\n如果应用有多个窗口，例如浏览器或 Finder，建议使用“最小化窗口”，只收起绑定窗口。\n\n此设置统一用于所有选择顶部收放的应用。"),from:sender)
@@ -607,6 +662,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             if field?.currentEditor() == nil { field?.stringValue = setting.formatted(setting.value(in:settings)) }
             field?.textColor = enabled ? Ink.hi:Ink.low
             for control in numericControls[setting] ?? [] { control.isEnabled = enabled; control.needsDisplay = true }
+            field?.superview?.needsDisplay = true
             for caption in numericLabels[setting] ?? [] { caption.textColor = enabled ? Ink.mid:Ink.low }
         }
     }
@@ -786,9 +842,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private func setSettingsError(_ message: String) { settingsError.stringValue = message; settingsError.toolTip = message; settingsError.isHidden = message.isEmpty }
     func reload() {
         let section = currentSection
-        stopRecording(); shortcutButtons.removeAll(); directionButtons.removeAll(); statusButtons.removeAll(); onBindingsChanged?()
+        stopRecording(); shortcutButtons.removeAll(); directionButtons.removeAll(); triggerButtons.removeAll(); statusButtons.removeAll(); onBindingsChanged?()
         for view in rows.arrangedSubviews { rows.removeArrangedSubview(view); view.removeFromSuperview() }
         rows.isHidden = store.bindings.isEmpty
+        columnHeader.isHidden = store.bindings.isEmpty
         emptyState.isHidden = !store.bindings.isEmpty
         reloadUndoNotice()
         for binding in store.bindings {
@@ -799,13 +856,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             name.font = .systemFont(ofSize:13.5,weight:.medium)
             name.lineBreakMode = .byTruncatingTail; name.usesSingleLineMode = true; name.cell?.wraps = false
             name.toolTip = binding.name; name.setAccessibilityLabel(binding.name); name.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
-            let shortcut = ActionButton(binding.shortcut?.title ?? L("录制快捷键")) { [weak self] in self?.record(binding.id) }
+            let shortcut = ActionButton("") { [weak self] in self?.record(binding.id) }
             shortcutButtons[binding.id] = shortcut; shortcut.font = .monospacedSystemFont(ofSize:11,weight:.medium); shortcut.isChip = true
-            shortcut.setAccessibilityLabel(L("{0}：{1}",binding.name,binding.shortcut?.title ?? L("录制快捷键")))
-            shortcut.hasError = hotkeys.errors[binding.id] != nil
-            shortcut.toolTip = hotkeys.errors[binding.id].map(Localization.refresh) ?? shortcut.title; shortcut.setAccessibilityHelp(shortcut.toolTip)
+            updateShortcutButton(shortcut,binding:binding)
             let remove = ActionButton("") { [weak self] in self?.remove(binding.id) }
-            remove.image = NSImage(systemSymbolName:"xmark",accessibilityDescription:L("删除 {0}",binding.name))
+            remove.image = NSImage(systemSymbolName:"trash",accessibilityDescription:L("删除 {0}",binding.name))
             remove.setAccessibilityLabel(L("删除 {0}",binding.name)); remove.toolTip = L("删除绑定")
             remove.iconSize = 10
             let inactiveTop = binding.selectedEdge == .top && !store.hoverSettings.topEnabled
@@ -815,9 +870,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             direction.hasError = false
             direction.setAccessibilityHelp(bindingStatus[binding.id]?.0)
             direction.isChip = true; direction.font = .systemFont(ofSize:11)
-            direction.setAccessibilityLabel(L("收起方向：")+binding.selectedEdge.title)
+            direction.setAccessibilityLabel(L("隐藏位置：")+binding.selectedEdge.title)
             direction.actionBlock = { [weak self,weak direction] in if let direction { self?.showDirections(binding,from:direction) } }
-            for control in [shortcut,direction] {
+            let trigger = DropdownButton(binding.trigger.title,action:{})
+            triggerButtons[binding.id] = trigger
+            trigger.isChip = true
+            trigger.setAccessibilityLabel(L("触发方式：{0}",binding.trigger.title))
+            trigger.actionBlock = { [weak self,weak trigger] in if let trigger { self?.showTriggers(binding,from:trigger) } }
+            for control in [shortcut,direction,trigger] {
                 control.translatesAutoresizingMaskIntoConstraints = false; control.heightAnchor.constraint(equalToConstant:28).isActive = true
                 control.setContentCompressionResistancePriority(.defaultHigh,for:.horizontal)
             }
@@ -839,7 +899,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             updateBindingStatus(binding.id)
             let card = GlassCard(); card.translatesAutoresizingMaskIntoConstraints = false
             card.heightAnchor.constraint(equalToConstant:44).isActive = true
-            let columns: [NSView] = [icon,name,direction,shortcut,statusSlot,remove]
+            let columns: [NSView] = [icon,name,direction,trigger,shortcut,statusSlot,remove]
             for (index,column) in columns.enumerated() {
                 column.translatesAutoresizingMaskIntoConstraints = false; card.addSubview(column)
                 NSLayoutConstraint.activate([
@@ -883,7 +943,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         panel.beginSheetModal(for:window) { [weak self] result in
             guard let self else { return }; self.lastPanel = nil
             guard result == .OK,let url = panel.url else { return }
-            do { let id = try self.store.add(url); self.reload(); DispatchQueue.main.async { self.record(id) } }
+            do {
+                let id = try self.store.add(url); self.reload()
+                if let button = self.directionButtons[id] { window.makeFirstResponder(button) }
+            }
             catch { self.setStatus(error.localizedDescription) }
         }
     }
@@ -936,7 +999,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
     private func statusMessage(_ id: UUID) -> String? {
         if let binding = store.bindings.first(where:{$0.id == id}),binding.selectedEdge == .top,!store.hoverSettings.topEnabled {
-            return L("顶部收放已关闭。此绑定保留原方向，但不会自动收起。已收起的窗口仍可召回；可在下拉框选择其他方向，或到“通用”开启顶部收放。")
+            return L("顶部收放已关闭。此绑定保留原位置，但不会自动收起。已收起的窗口仍可召回；可在下拉框选择其他位置，或到“通用”开启顶部收放。")
         }
         guard let status = bindingStatus[id],!status.0.isEmpty else { return nil }
         return Localization.refresh(status.0)
@@ -958,9 +1021,26 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
     func showDirections(_ binding: AppBinding,from anchor: NSView) {
         let edges = WindowEdge.available(topEnabled:store.hoverSettings.topEnabled)
-        showPicker(edges.map(\.title),selected:edges.firstIndex(of:binding.selectedEdge) ?? -1,from:anchor,label:L("收起方向")) { [weak self] index in
+        showPicker(edges.map(\.title),selected:edges.firstIndex(of:binding.selectedEdge) ?? -1,from:anchor,label:L("隐藏位置")) { [weak self] index in
             self?.setEdge(binding.id,edges[index])
         }
+    }
+    private func showTriggers(_ binding: AppBinding,from anchor: NSView) {
+        let triggers = BindingTrigger.allCases
+        showPicker(triggers.map(\.title),selected:triggers.firstIndex(of:binding.trigger) ?? 0,from:anchor,label:L("触发方式")) { [weak self] index in
+            self?.setTrigger(binding.id,triggers[index])
+        }
+    }
+    private func setTrigger(_ id: UUID,_ trigger: BindingTrigger) {
+        guard let binding = store.bindings.first(where:{$0.id == id}),binding.trigger != trigger else { return }
+        if trigger != .hover,binding.shortcut == nil {
+            record(id,trigger:trigger); return
+        }
+        do {
+            try store.setShortcut(trigger == .hover ? nil : binding.shortcut,for:id,shortcutOnly:trigger == .keyboard)
+            hotkeys.reload(store.bindings); reload()
+            if showsKeyboardFocus,let button = triggerButtons[id] { window?.makeFirstResponder(button) }
+        } catch { setStatus(error.localizedDescription) }
     }
     private func showPicker(_ titles: [String],selected: Int,from anchor: NSView,label: String,onSelect: @escaping (Int)->Void) {
         stopRecording()
@@ -989,11 +1069,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             row.setAccessibilityLabel("\(label)：\(title)")
             row.setAccessibilityValue(index == selected ? L("已选择"):L("未选择"))
             row.state = index == selected ? .on:.off
-            row.keyboardHighlighted = NSApp.currentEvent?.type == .keyDown && index == pickerIndex
+            row.keyboardFocused = NSApp.currentEvent?.type == .keyDown && index == pickerIndex
             pickerRows.append(row); surface.addSubview(row)
         }
         selectionPanel = panel
-        guard let window,let anchorWindow = anchor.window else { closeSelection(); return }
+        guard let window = window as? SettingsWindow,let anchorWindow = anchor.window else { closeSelection(); return }
         let inWindow = anchor.convert(anchor.bounds,to:nil)
         let anchorRect = anchorWindow.convertToScreen(inWindow)
         var origin = NSPoint(x:anchorRect.minX,y:anchorRect.minY-height-4)
@@ -1003,8 +1083,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         panel.setFrame(NSRect(origin:origin,size:NSSize(width:width,height:height)),display:false)
         window.addChildWindow(panel,ordered:.above)
         panel.orderFront(nil)
-        selectionMonitor = NSEvent.addLocalMonitorForEvents(matching:[.leftMouseDown,.rightMouseDown,.keyDown,.scrollWheel]) { [weak self] event in
+        selectionMonitor = NSEvent.addLocalMonitorForEvents(matching:[.leftMouseDown,.rightMouseDown,.otherMouseDown,.keyDown,.scrollWheel]) { [weak self,weak window] event in
             guard let self else { return event }
+            // Local monitors see menu events before the settings window does.
+            window?.trackFocusInput(event)
             if event.type == .keyDown {
                 guard event.modifierFlags.intersection([.command,.control,.option]).isEmpty else { self.closeSelection(); return event }
                 switch event.keyCode {
@@ -1032,7 +1114,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
     private func movePicker(to index: Int) {
         pickerIndex = index
-        for (i,row) in pickerRows.enumerated() { row.keyboardHighlighted = i == index }
+        for (i,row) in pickerRows.enumerated() { row.keyboardFocused = i == index }
         if pickerRows.indices.contains(index) { NSAccessibility.post(element:pickerRows[index],notification:.focusedUIElementChanged) }
     }
     private func closeSelection() {
@@ -1042,7 +1124,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         selectionPanel = nil; pickerSelection = nil
         let anchor = pickerAnchor
         pickerAnchor?.disclosureExpanded = false; pickerAnchor = nil; pickerRows = []
-        if let anchor,anchor.window?.isKeyWindow == true { anchor.window?.makeFirstResponder(anchor) }
+        if showsKeyboardFocus,let anchor,anchor.window?.isKeyWindow == true { anchor.window?.makeFirstResponder(anchor) }
     }
     @objc private func pickerRowPressed(_ sender: NSButton) {
         let selection = pickerSelection
@@ -1054,7 +1136,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
               let current = store.bindings.first(where:{$0.id == id}),current.selectedEdge != edge else { return }
         prepare(id) { [weak self] in
             guard let self else { return }
-            do { try self.store.configure(id,edge:edge,windowTitle:nil,changeWindow:true); self.bindingStatus.removeValue(forKey:id); self.reload(); if let button = self.directionButtons[id] { self.window?.makeFirstResponder(button) } }
+            do { try self.store.configure(id,edge:edge,windowTitle:nil,changeWindow:true); self.bindingStatus.removeValue(forKey:id); self.reload(); if self.showsKeyboardFocus,let button = self.directionButtons[id] { self.window?.makeFirstResponder(button) } }
             catch { self.setStatus(error.localizedDescription) }
         }
     }
@@ -1063,45 +1145,64 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         if !AXIsProcessTrusted() { _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String:true] as CFDictionary) }
         if let url = URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
     }
-    func record(_ id: UUID) {
+    private func updateShortcutButton(_ button: ActionButton,binding: AppBinding) {
+        button.title = binding.shortcut?.title ?? L("录制")
+        button.setAccessibilityLabel(L("{0}：{1}",binding.name,binding.shortcut?.title ?? L("录制快捷键")))
+        button.hasError = hotkeys.errors[binding.id] != nil
+        button.toolTip = hotkeys.errors[binding.id].map(Localization.refresh) ?? binding.shortcut?.title ?? L("录制快捷键")
+        button.setAccessibilityHelp(button.toolTip); button.invalidateIntrinsicContentSize()
+    }
+    private func record(_ id: UUID,trigger: BindingTrigger? = nil) {
         guard let window,window.attachedSheet == nil,let button = shortcutButtons[id] else { return }
         showApps(); setStatus("")
         hotkeys.suspend(); onRecordingChanged?(true); recordingID = id; recorderButton = button
-        button.title = L("● 录制中"); button.toolTip = L("Esc 取消，Delete 清除"); button.invalidateIntrinsicContentSize()
+        button.isRecordingShortcut = true
+        button.title = L("● 录制"); button.toolTip = L("Esc 取消，Delete 清除")
+        button.setAccessibilityLabel(L("正在录制快捷键")); button.setAccessibilityHelp(button.toolTip)
+        button.invalidateIntrinsicContentSize()
         window.makeFirstResponder(button)
         recordingTimer = Timer.scheduledTimer(withTimeInterval:0.6,repeats:true) { [weak self] _ in
             guard let self else { return }; self.recordingPulse.toggle()
-            self.recorderButton?.title = self.recordingPulse ? L("○ 录制中"):L("● 录制中")
+            self.recorderButton?.title = self.recordingPulse ? L("○ 录制"):L("● 录制")
         }
         monitor = NSEvent.addLocalMonitorForEvents(matching:[.keyDown,.leftMouseDown]) { [weak self] event in
             guard let self else { return event }
             if event.type == .leftMouseDown { self.stopRecording(); return event }
             if event.keyCode == 53 && event.modifierFlags.intersection([.command,.option,.control,.shift]).isEmpty {
-                self.stopRecording(); self.reload(); return nil
+                self.stopRecording()
+                if trigger != nil,let button = self.triggerButtons[id] { self.window?.makeFirstResponder(button) }
+                return nil
             }
             guard !event.isARepeat else { return nil }
             if [UInt16(51),UInt16(117)].contains(event.keyCode) && event.modifierFlags.intersection([.command,.option,.control,.shift]).isEmpty {
-                do { try self.store.setShortcut(nil,for:id); self.stopRecording(); self.reload() }
+                do { try self.store.setShortcut(nil,for:id); self.finishRecording(id) }
                 catch { self.setStatus(error.localizedDescription) }; return nil
             }
             guard let shortcut = Shortcut.capture(event) else { self.setStatus(L("请同时按住 ⌘、⌥ 或 ⌃。")); return nil }
             do {
                 if self.store.bindings.contains(where:{$0.id != id && $0.shortcut?.matches(shortcut) == true}) { throw PeekError.message(L("这个快捷键已绑定到另一个应用。")) }
                 if let error = self.hotkeys.validate(shortcut) { throw PeekError.message(error) }
-                try self.store.setShortcut(shortcut,for:id)
-                self.stopRecording(); self.reload()
+                try self.store.setShortcut(shortcut,for:id,shortcutOnly:trigger.map { $0 == .keyboard })
+                self.finishRecording(id)
             } catch { self.setStatus(error.localizedDescription) }
             return nil
         }
     }
+    private func finishRecording(_ id: UUID) {
+        stopRecording(); reload()
+        if let button = shortcutButtons[id] { window?.makeFirstResponder(button) }
+    }
     private func stopRecording() {
         guard let id = recordingID else { return }
         if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil
-        recordingTimer?.invalidate(); recordingTimer = nil
-        recorderButton?.title = store.bindings.first(where:{$0.id == id})?.shortcut?.title ?? L("录制快捷键")
-        recorderButton?.invalidateIntrinsicContentSize(); recorderButton?.toolTip = nil
-        recorderButton?.hasError = false; recorderButton?.setAccessibilityHelp(nil); recorderButton = nil; recordingID = nil
-        hotkeys.reload(store.bindings); onRecordingChanged?(false); setStatus("")
+        recordingTimer?.invalidate(); recordingTimer = nil; recordingPulse = false
+        hotkeys.reload(store.bindings)
+        recorderButton?.isRecordingShortcut = false
+        if let button = recorderButton,let binding = store.bindings.first(where:{$0.id == id}) {
+            updateShortcutButton(button,binding:binding)
+        }
+        recorderButton = nil; recordingID = nil
+        onRecordingChanged?(false); setStatus("")
     }
     func windowDidBecomeKey(_ notification: Notification) { reloadGeneral() }
     func windowDidResignKey(_ notification: Notification) { closeOptions(); stopRecording() }

@@ -52,6 +52,10 @@ struct HoverWindow {
     var onCurrentSpace = true
     var observedAt = ProcessInfo.processInfo.systemUptime
     var automaticHideDeferred = false
+    // A saved recovery can provide an explicit recall entry even when the
+    // live visibility is unknown. Never treat this as confirmed hidden state.
+    var recallPending = false
+    var requiresRecall: Bool { hidden || recallPending }
     // Use the window's segment, not the whole display edge. Half-open spans
     // keep adjoining windows from sharing a trigger at their common boundary.
     func containsTrigger(_ pointer: CGPoint) -> Bool {
@@ -84,6 +88,8 @@ struct HoverWindow {
 // WindowServer geometry includes newly opened viewers, panels and menus even
 // when an app has not published them through AX yet. No window titles needed.
 enum ApplicationHoverArea {
+    private static let cursorLayer = CGWindowLevelForKey(.cursorWindow)
+
     static func visibleWindows() -> [[String:Any]]? {
         CGWindowListCopyWindowInfo([.optionOnScreenOnly,.excludeDesktopElements],kCGNullWindowID) as? [[String:Any]]
     }
@@ -95,6 +101,10 @@ enum ApplicationHoverArea {
             guard let bounds = info[kCGWindowBounds as String] as? [String:Any],
                   let frame = CGRect(dictionaryRepresentation:bounds as CFDictionary),
                   frame.width > 0,frame.height > 0,frame.contains(pointer) else { continue }
+            // WindowServer can list the mouse cursor itself in front of the
+            // window under the pointer. It does not occlude app windows.
+            guard let layer = info[kCGWindowLayer as String] as? NSNumber else { return nil }
+            if layer.int32Value == cursorLayer { continue }
             guard let owner = info[kCGWindowOwnerPID as String] as? NSNumber else { return nil }
             return owner.int32Value == pid
         }
@@ -111,7 +121,7 @@ struct HoverTracker {
     mutating func update(hidden: Bool) { edgeSince = nil; outsideSince = nil; entered = false; rearm = hidden; fired = false }
     mutating func sample(_ pointer: CGPoint,window: HoverWindow,now: TimeInterval,showDelay: Double,hideDelay: Double,background: Bool = false,allowReveal: Bool = true) -> Bool? {
         let atEdge = window.containsTrigger(pointer)
-        if window.hidden || (background && !entered) {
+        if window.requiresRecall || (background && !entered) {
             if !atEdge { rearm = false; edgeSince = nil; fired = false; return nil }
             guard allowReveal else { edgeSince = nil; return nil }
             guard !rearm,!fired else { return nil }
@@ -157,6 +167,7 @@ final class HoverController {
     private var lastTick: TimeInterval = 0
     func configure(_ items: [AppBinding],settings: HoverSettings = HoverSettings()) {
         self.settings = settings
+        let items = items.filter(\.allowsHover)
         bindings = Dictionary(items.map{($0.id,$0)},uniquingKeysWith:{$1})
         bindingOrder = items.map(\.id)
         windows = windows.filter { settings.enabled && bindings[$0.key] != nil && (settings.allowSpaceSwitch || $0.value.onCurrentSpace) }
@@ -173,25 +184,25 @@ final class HoverController {
             tracker.outsideSince = nil; tracker.fired = false; tracker.entered = true
             trackers[window.id] = tracker
         }
-        let hoverRevealed = !window.hidden && pendingReveals.remove(window.id) != nil
+        let hoverRevealed = !window.requiresRecall && pendingReveals.remove(window.id) != nil
         if !interactionProvider(),!wasInteracting,window.observedAt >= geometryAfter,
            awaitingGeometry.remove(window.id) != nil {
-            var tracker = HoverTracker(); tracker.update(hidden:window.hidden)
+            var tracker = HoverTracker(); tracker.update(hidden:window.requiresRecall)
             tracker.entered = hoverRevealed
-            tracker.rearm = window.hidden && window.containsTrigger(mouseInAX())
+            tracker.rearm = window.requiresRecall && window.containsTrigger(mouseInAX())
             trackers[window.id] = tracker
             updateTimer(); return
         }
         // Geometry refreshes must not restart dwell timers or lose leave tracking.
-        if !hoverRevealed,let previous, previous.hidden == window.hidden, previous.edge == window.edge,
+        if !hoverRevealed,let previous, previous.hidden == window.hidden, previous.recallPending == window.recallPending, previous.edge == window.edge,
            previous.screen == window.screen, previous.pid == window.pid, previous.onCurrentSpace == window.onCurrentSpace { return }
-        var tracker = HoverTracker(); tracker.update(hidden:window.hidden)
+        var tracker = HoverTracker(); tracker.update(hidden:window.requiresRecall)
         // A Hover reveal owns the leave gesture even if the pointer moves away
         // before the restored window can receive a sample inside its content.
         tracker.entered = hoverRevealed
         let point = mouseInAX()
         tracker.rearm = window.hidden && window.manualHide && window.containsTrigger(point)
-        output("hover_tracking",["binding":window.id.uuidString,"hidden":window.hidden,"rearm":tracker.rearm,"mouse_x":point.x,"mouse_y":point.y,"screen_x":window.screen.minX,"screen_y":window.screen.minY,"screen_width":window.screen.width,"screen_height":window.screen.height])
+        output("hover_tracking",["binding":window.id.uuidString,"hidden":window.hidden,"recall_pending":window.recallPending,"rearm":tracker.rearm,"mouse_x":point.x,"mouse_y":point.y,"screen_x":window.screen.minX,"screen_y":window.screen.minY,"screen_width":window.screen.width,"screen_height":window.screen.height])
         trackers[window.id] = tracker; updateTimer()
     }
     func remove(_ id: UUID) { windows.removeValue(forKey:id); trackers.removeValue(forKey:id); awaitingGeometry.remove(id); pendingReveals.remove(id); updateTimer() }
@@ -222,7 +233,7 @@ final class HoverController {
             // Discard elapsed dwell/leave time. Closing Launchpad must not
             // immediately replay an old hide or reveal gesture.
             for (id,window) in windows {
-                var tracker = HoverTracker(); tracker.update(hidden:window.hidden)
+                var tracker = HoverTracker(); tracker.update(hidden:window.requiresRecall)
                 tracker.rearm = window.containsTrigger(mouseInAX())
                 trackers[id] = tracker
             }
@@ -244,7 +255,7 @@ final class HoverController {
         let frontPID = foregroundProvider()
         let candidates = bindingOrder.filter { id in
             !awaitingGeometry.contains(id) && windows[id].map { window in
-                (settings.topEnabled || window.edge != .top || window.hidden) && window.containsTrigger(pointer)
+                (settings.topEnabled || window.edge != .top || window.requiresRecall) && window.containsTrigger(pointer)
             } == true
         }
         if edgeOwner.map({ candidates.contains($0) }) != true {
@@ -253,7 +264,7 @@ final class HoverController {
             edgeOwner = candidates.first(where:{ windows[$0]?.pid != nil && windows[$0]?.pid == frontPID }) ?? candidates.first
             edgeConsumed = false
         }
-        if let owner = edgeOwner,let window = windows[owner],window.onCurrentSpace,!window.hidden,window.pid == frontPID,frontPID != nil {
+        if let owner = edgeOwner,let window = windows[owner],window.onCurrentSpace,!window.requiresRecall,window.pid == frontPID,frontPID != nil {
             edgeConsumed = true
         }
         var intents: [(UUID,Bool)] = []
@@ -263,8 +274,8 @@ final class HoverController {
             guard let window = windows[id],!awaitingGeometry.contains(id),var tracker = trackers[id] else { continue }
             // Disabling the experiment still permits recall of an owned hidden
             // window, but must never enqueue another top hide.
-            guard settings.topEnabled || window.edge != .top || window.hidden else { continue }
-            if !window.hidden,window.onCurrentSpace,window.edge == .top,settings.topHideMode == .appHide,
+            guard settings.topEnabled || window.edge != .top || window.requiresRecall else { continue }
+            if !window.requiresRecall,window.onCurrentSpace,window.edge == .top,settings.topHideMode == .appHide,
                let pid = window.pid,!window.containsOpenArea(pointer),!window.containsTrigger(pointer) {
                 if !readApplicationWindows {
                     applicationWindows = ApplicationHoverArea.visibleWindows(); readApplicationWindows = true

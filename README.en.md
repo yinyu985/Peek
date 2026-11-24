@@ -6,10 +6,11 @@
 <p align="center">Hide windows you are not using. Bring them back when you need them.</p>
 <p align="center"><a href="https://the-peek.pages.dev">Website</a> · <a href="https://github.com/yinyu985/Peek/releases/latest">Download</a></p>
 
-Peek is a lightweight window utility for macOS. Assign an application a shortcut and a screen edge to hide its window, then bring it back with the shortcut or by hovering over its edge of the screen.
+Peek is a lightweight window utility for macOS. Choose a hide position for each app and control its window with a shortcut, edge hover, or both.
 
 - **Chinese and English**: choose 简体中文 or English in General → Language. Pages, menus, and messages update immediately.
-- **A shortcut for each app**: give each application its own shortcut and hide direction.
+- **A shortcut for each app**: give each application its own shortcut and hide position.
+- **Two ways to trigger**: choose **Hover only**, **Keys only**, or **Both** for each app. Hover only needs no shortcut; switch the trigger in the app row.
 - **Auto show and hide**: hover over the window's segment of the screen edge to show it. Move away to hide it after the hide delay. Windows sharing an edge do not all appear at once.
 - **Keep a visible strip**: choose 0–100 logical pixels for the left, right, and bottom edges. The default is 8.
 - **Keep window sizes**: restored windows align with the selected edge. Peek respects subsequent dragging and resizing.
@@ -19,9 +20,9 @@ Peek is a lightweight window utility for macOS. Assign an application a shortcut
 
 ## Interface
 
-Add applications, record shortcuts, and choose hide directions:
+Add applications, choose hide positions and triggers, and record shortcuts:
 
-<img src="docs/images/applications.png" width="600" alt="Peek Apps page: application list, shortcuts, and hide directions">
+<img src="docs/images/applications.png" width="600" alt="Peek Apps page: application list, hide positions, triggers, and shortcuts">
 
 Set automatic behavior, visible strip width, delays, and animation durations:
 
@@ -72,8 +73,8 @@ Follow Peek's prompt to **System Settings → Privacy & Security → Accessibili
 ## Getting started
 
 1. Open Apps and select Add app. To set up the initial edge trigger, the target application must be running with a standard window open.
-2. Record a shortcut and choose a direction. **Start with Left or Right**; the top edge is an optional experiment.
-3. Press the shortcut to bring the window forward. Press it again while the window is in front to hide it.
+2. Choose a hide position. **Start with Left or Right**; the top edge is an optional experiment.
+3. Choose a trigger next to the direction. New apps use **Hover only** by default, with no shortcut. Hover over the matching edge to show the window and move away to hide it. **Keys only** and **Both** need a shortcut. Press it to show the window, then press it again while the window is in front to hide it. Switching back to **Hover only** clears the shortcut. Turning off **Auto show and hide** in Behavior pauses all hover triggers.
 4. In Behavior, adjust Visible strip and the four timing settings. The strip is measured in macOS logical pixels (pt) and applies on the next hide. Zero keeps a minimal 1pt edge to reduce the chance of macOS pulling the window back. Both trigger delays default to zero seconds.
 
 ### Top edge (experimental)
