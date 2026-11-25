@@ -380,6 +380,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let generalPage = NSView()
     private let aboutPage = NSView()
     private let rows = TopAlignedStack()
+    private var columnSpacing: NSLayoutConstraint?
+    private var columnHeight: NSLayoutConstraint?
     private let columnHeader = ApplicationColumnHeader(captions:[
         (2,L("隐藏位置"),false),(3,L("触发方式"),false),(4,L("快捷键"),true)
     ])
@@ -524,10 +526,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         emptyState.orientation = .vertical; emptyState.alignment = .leading; emptyState.spacing = 8
         emptyState.addArrangedSubview(emptyTitle); emptyState.addArrangedSubview(emptyHelp)
         undoNotice.orientation = .vertical; undoNotice.alignment = .leading; undoNotice.spacing = 4
-        NSLayoutConstraint.activate([columnHeader.heightAnchor.constraint(equalToConstant:16)])
-        buildSection(mainPage,views:[header,columnHeader,emptyState,rows,undoNotice,permissionButton])
-        // The captions belong to the list: keep them close to the first card.
-        (columnHeader.superview as? NSStackView)?.setCustomSpacing(6,after:columnHeader)
+        buildSection(mainPage,views:[header,emptyState,rows,undoNotice,permissionButton])
         buildSection(settingsPage,views:[label(L("收放"),20,.semibold),settingsRows])
         buildSection(generalPage,views:[label(L("通用"),20,.semibold),settingsCard(generalRows)])
         let version = Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "—"
@@ -570,6 +569,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let headerArea = NSView(); headerArea.translatesAutoresizingMaskIntoConstraints = false
         header.translatesAutoresizingMaskIntoConstraints = false; scroll.translatesAutoresizingMaskIntoConstraints = false
         page.addSubview(headerArea); headerArea.addSubview(header); page.addSubview(scroll)
+        let contentTop: NSLayoutConstraint
+        if page === mainPage {
+            page.addSubview(columnHeader); columnHeader.translatesAutoresizingMaskIntoConstraints = false
+            let height = columnHeader.heightAnchor.constraint(equalToConstant:16); columnHeight = height
+            let gap = scroll.topAnchor.constraint(equalTo:columnHeader.bottomAnchor,constant:6); columnSpacing = gap
+            NSLayoutConstraint.activate([height,columnHeader.topAnchor.constraint(equalTo:headerArea.bottomAnchor,constant:18),columnHeader.leadingAnchor.constraint(equalTo:scroll.leadingAnchor),columnHeader.trailingAnchor.constraint(equalTo:scroll.trailingAnchor)])
+            contentTop = gap
+        } else { contentTop = scroll.topAnchor.constraint(equalTo:headerArea.bottomAnchor,constant:18) }
         NSLayoutConstraint.activate([
             headerArea.topAnchor.constraint(equalTo:page.topAnchor,constant:40),
             headerArea.leadingAnchor.constraint(equalTo:page.leadingAnchor,constant:Layout.pageInset),
@@ -577,7 +584,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             headerArea.heightAnchor.constraint(equalToConstant:Layout.headerHeight),
             header.leadingAnchor.constraint(equalTo:headerArea.leadingAnchor),header.trailingAnchor.constraint(equalTo:headerArea.trailingAnchor),
             header.centerYAnchor.constraint(equalTo:headerArea.centerYAnchor),
-            scroll.topAnchor.constraint(equalTo:headerArea.bottomAnchor,constant:18),scroll.leadingAnchor.constraint(equalTo:page.leadingAnchor,constant:Layout.pageInset),
+            contentTop,scroll.leadingAnchor.constraint(equalTo:page.leadingAnchor,constant:Layout.pageInset),
             scroll.trailingAnchor.constraint(equalTo:page.trailingAnchor,constant:-Layout.pageInset),scroll.bottomAnchor.constraint(equalTo:page.bottomAnchor,constant:-Layout.pageInset)
         ])
         let content = TopAlignedStack(views:Array(views.dropFirst()))
@@ -640,7 +647,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     @objc private func showSpaceHelp(_ sender: NSButton) {
         showHelp(L("关闭：只在当前桌面收放。\n\n开启：Hover 或快捷键可能切走当前桌面，转到窗口所在的桌面。不会把窗口搬到当前桌面；能否切换由 macOS 决定。\n\n推荐：Dock 中右键目标应用 → 选项 → 分配给 → 所有桌面。"),from:sender)
     }
-    private func showHelp(_ message: String,from sender: NSButton) {
+    private func showHelp(_ message: String,from sender: NSView) {
         spaceHelpPopover?.close()
         let text = NSTextField(wrappingLabelWithString:message)
         text.font = .systemFont(ofSize:12); text.textColor = Ink.mid
@@ -846,6 +853,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         for view in rows.arrangedSubviews { rows.removeArrangedSubview(view); view.removeFromSuperview() }
         rows.isHidden = store.bindings.isEmpty
         columnHeader.isHidden = store.bindings.isEmpty
+        columnHeight?.constant = columnHeader.isHidden ? 0:16; columnSpacing?.constant = columnHeader.isHidden ? 0:6
         emptyState.isHidden = !store.bindings.isEmpty
         reloadUndoNotice()
         for binding in store.bindings {
@@ -855,6 +863,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             let name = ApplicationNameField(labelWithString:binding.name)
             name.font = .systemFont(ofSize:13.5,weight:.medium)
             name.lineBreakMode = .byTruncatingTail; name.usesSingleLineMode = true; name.cell?.wraps = false
+            name.identifier = NSUserInterfaceItemIdentifier(binding.id.uuidString)
+            name.addGestureRecognizer(NSClickGestureRecognizer(target:self,action:#selector(showNameHelp(_:))))
             name.toolTip = binding.name; name.setAccessibilityLabel(binding.name); name.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
             let shortcut = ActionButton("") { [weak self] in self?.record(binding.id) }
             shortcutButtons[binding.id] = shortcut; shortcut.font = .monospacedSystemFont(ofSize:11,weight:.medium); shortcut.isChip = true
@@ -1014,6 +1024,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         statusButtons[id]?.isHidden = !noteworthy
         statusButtons[id]?.toolTip = message
         statusButtons[id]?.setAccessibilityLabel(L("收放状态说明：")+(message ?? ""))
+    }
+    @objc private func showNameHelp(_ sender: NSClickGestureRecognizer) {
+        guard let view = sender.view, let key = view.identifier?.rawValue, let id = UUID(uuidString:key),
+              statusButtons[id]?.isHidden == false, let message = statusMessage(id) else { return }
+        showHelp(message,from:view)
     }
     @objc private func showBindingHelp(_ sender: NSButton) {
         guard let key = sender.identifier?.rawValue,let id = UUID(uuidString:key),let message = statusMessage(id) else { return }

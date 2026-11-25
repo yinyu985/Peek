@@ -19,7 +19,9 @@
 
 编译、双架构签名检查和 DMG 完整性检查成功后才替换产物。更新前先退出旧版本，让受管理的窗口完成恢复，再通过 Finder 拖入并替换。没有安装或启动脚本。
 
-图标生成器自动清理中间文件。构建使用 ad-hoc 签名，没有 Apple 公证。
+图标生成器自动清理中间文件。默认构建使用 ad-hoc 签名，没有 Apple 公证。需要公证时，在本机钥匙串配置 Developer ID Application 证书和 `notarytool store-credentials` profile，指定 `DEVELOPER_ID_APPLICATION='Developer ID Application: …' NOTARY_PROFILE='…' ./app/build.sh`。两个架构均先公证并装订 app，再签名、公证并装订 DMG，最后生成校验文件。
+
+GitHub Actions 默认沿用 ad-hoc。启用公证需设置仓库变量 `PEEK_NOTARIZE=true`、`PEEK_SIGN_IDENTITY`、`PEEK_TEAM_ID`，以及 secrets `PEEK_CERTIFICATE_P12_BASE64`（含私钥）、`PEEK_CERTIFICATE_PASSWORD`、`PEEK_APPLE_ID`、`PEEK_APP_PASSWORD`（应用专用密码）。不要把证书或密码提交到仓库。首次公证发布前同步中英文 README 和官网的安装说明。
 
 修改 `build.sh` 顶部的 `version` 和 `build_number`，分别写入 `CFBundleShortVersionString`（用户可见版本）和 `CFBundleVersion`（内部构建编号）。`AppIcon.icns` 是随源码保留的运行资源，不是待删除缓存。
 
@@ -65,9 +67,9 @@ git push origin v1.4.14
 ## 本地数据
 
 - 设置：`~/Library/Preferences/dev.local.Peek.plist`
-- 恢复记录：`~/Library/Application Support/Peek/window-recovery.json`
+- 恢复记录：`~/Library/Application Support/Peek/window-recovery.json`。同目录 `.json.lock` 后缀的文件用于排他锁；进程退出时释放锁，锁文件留在原位。仅数据变化时写回，拒绝覆盖外部改写。
 - 应用状态：设置中的 `RecallAnchors.v1`，保存屏幕、展开布局和最近确认的 `hidden` 状态，不作为旧窗口恢复身份。兼容仅有几何的旧数据。目标应用退出后仍可从此入口发起启动请求；新窗口发现期间不得用临时可见状态或离线入口覆盖保存的隐藏状态。
-- 日志：`~/Library/Logs/Peek/app-launch.jsonl`；`recovery_reattached` 表示后台重新接管整应用隐藏记录，不代表窗口已经恢复可见。
+- 日志：`~/Library/Logs/Peek/peek-YYYY-MM-DD.jsonl`（UTC）。写入新日期时清理，只保留今天及之前 6 天；旧 `app-launch.jsonl` 超过 7 天未更新后清理。单文件达到约 4 MiB 后续写 `peek-YYYY-MM-DD.1.jsonl` 等分卷。默认记录已注册快捷键的触发／松开、Hover 意图、绑定和设置变更、窗口选择／焦点／移动、恢复及失败，不需要启动参数。按 `session`、`request` 和 `seq` 串联 `window_request`、`window_queue_delay`、`request_stage`、`window_toggle`、`request_finished`；`request_skipped` 与 `request_cancelled` 区分未开始和已失效的意图。`stage`、`reason`、`message`、`ax_code` 等字段解释失败；AX 读失败按属性和返回码在每次执行中去重。不记录输入内容和窗口标题；日志含应用标识、窗口位置和操作时间，分享前检查。`recovery_reattached` 表示后台重新接管整应用隐藏记录，不代表窗口已经恢复可见。
 
 清理构建产物时不要删除这些数据。构建产物、临时检查程序及个人研究资料不进入 Git；`docs/images/` 中用于 README 的产品图片应提交。
 

@@ -2,13 +2,7 @@ import AppKit
 import ApplicationServices
 
 func output(_ event: String,_ fields: [String:Any] = [:]) {
-    var row = fields; row["event"] = event; row["time"] = ISO8601DateFormatter().string(from:Date())
-    guard let data = try? JSONSerialization.data(withJSONObject:row,options:.sortedKeys) else { return }
-    let line = data + Data([10])
-    let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Peek")
-    try? FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true)
-    let fd = Darwin.open(directory.appendingPathComponent("app-launch.jsonl").path,O_WRONLY|O_CREAT|O_APPEND,0o600)
-    if fd >= 0 { line.withUnsafeBytes { _ = Darwin.write(fd,$0.baseAddress,line.count) }; Darwin.close(fd) }
+    DiagnosticLog.shared.record(event,fields)
 }
 final class Controller: NSObject,NSApplicationDelegate {
     let store = BindingStore()
@@ -60,7 +54,8 @@ final class Controller: NSObject,NSApplicationDelegate {
         refreshHoverTargets()
         hotkeys.reload(store.bindings); mainWindow.reload()
         rebuildMenus(); openWindow()
-        output("ready",["pid":ProcessInfo.processInfo.processIdentifier,"bindings":store.bindings.count,"hotkey_errors":hotkeys.errors.count,"mode":"window edge","trusted":AXIsProcessTrusted(),"menu_bar_icon":store.menuBarIconVisible])
+        if toggler.recoveryReadFailed { mainWindow.setStatus(toggler.recoveryWarning) }
+        output("ready",["version":Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") ?? "unknown","build":Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") ?? "unknown","os":ProcessInfo.processInfo.operatingSystemVersionString,"pid":ProcessInfo.processInfo.processIdentifier,"bindings":store.bindings.count,"hotkey_errors":hotkeys.errors.count,"mode":"window edge","trusted":AXIsProcessTrusted(),"menu_bar_icon":store.menuBarIconVisible])
     }
     private func makeMainWindow() {
         mainWindow = MainWindowController(store:store,hotkeys:hotkeys)
@@ -145,7 +140,7 @@ final class Controller: NSObject,NSApplicationDelegate {
     @objc func quit() { NSApp.terminate(nil) }
     func applicationShouldHandleReopen(_ sender: NSApplication,hasVisibleWindows flag: Bool) -> Bool { guard mainWindow != nil else { return true }; openWindow(); return true }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
-    func applicationWillTerminate(_ notification: Notification) { hotkeys.suspend(); output("app_quitting") }
+    func applicationWillTerminate(_ notification: Notification) { hotkeys.suspend(); output("app_quitting"); DiagnosticLog.shared.flush() }
 }
 signal(SIGPIPE,SIG_IGN)
 // Peek keeps running with no window, so macOS state restoration has nothing to

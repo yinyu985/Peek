@@ -15,7 +15,7 @@ concurrency:
 jobs:
   release:
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 60
     permissions:
       contents: write
     env:
@@ -24,6 +24,33 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+
+      - name: Configure signed release
+        if: vars.PEEK_NOTARIZE == 'true'
+        env:
+          CERT: ${{ secrets.PEEK_CERTIFICATE_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.PEEK_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ vars.PEEK_SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.PEEK_APPLE_ID }}
+          TEAM: ${{ vars.PEEK_TEAM_ID }}
+          APP_PASSWORD: ${{ secrets.PEEK_APP_PASSWORD }}
+        run: |
+          set -eu
+          : "${IDENTITY:?}" "${TEAM:?}"
+          umask 077
+          kc="$RUNNER_TEMP/peek.keychain-db"
+          pw=$(openssl rand -hex 32)
+          security create-keychain -p "$pw" "$kc"
+          security set-keychain-settings -lut 3600 "$kc"
+          security unlock-keychain -p "$pw" "$kc"
+          security default-keychain -s "$kc"
+          security list-keychains -d user -s "$kc"
+          printf '%s' "$CERT" | base64 -D > "$RUNNER_TEMP/peek.p12"
+          security import "$RUNNER_TEMP/peek.p12" -k "$kc" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/peek.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$pw" "$kc"
+          xcrun notarytool store-credentials PeekRelease --apple-id "$APPLE_ID" --team-id "$TEAM" --password "$APP_PASSWORD"
+          printf 'DEVELOPER_ID_APPLICATION=%s\nNOTARY_PROFILE=PeekRelease\n' "$IDENTITY" >> "$GITHUB_ENV"
 
       - name: Build ARM64 and Intel DMGs
         run: ./app/build.sh
@@ -60,6 +87,14 @@ jobs:
 
           `.sha256` 文件用于校验下载完整性，普通用户无需下载。
           NOTES
+          if [[ -n ${NOTARY_PROFILE:-} ]]; then
+            python3 - "$notes" <<'PY'
+          import pathlib, sys
+          path = pathlib.Path(sys.argv[1]); text = path.read_text()
+          start, end = text.index('Peek 尚未经过'), text.index('首次使用还需')
+          path.write_text(text[:start] + '本版本已使用 Developer ID 签名并经过 Apple 公证。\n' + text[end:])
+          PY
+          fi
           # A failed upload stays a draft; reruns can finish that draft.
           draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' 2>/dev/null || true)
           case "$draft" in
@@ -68,5 +103,6 @@ jobs:
             '') gh release create "$RELEASE_TAG" --verify-tag --draft --title "Peek $version" --notes-file "$notes" ;;
             *) echo "Unexpected release state: $draft" >&2; exit 1 ;;
           esac
+          gh release edit "$RELEASE_TAG" --notes-file "$notes"
           gh release upload "$RELEASE_TAG" "$arm_image" "$arm_image.sha256" "$intel_image" "$intel_image.sha256" --clobber
           gh release edit "$RELEASE_TAG" --draft=false --latest

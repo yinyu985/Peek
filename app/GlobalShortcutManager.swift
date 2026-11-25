@@ -25,12 +25,19 @@ final class GlobalShortcutManager {
             let manager = Unmanaged<GlobalShortcutManager>.fromOpaque(context).takeUnretainedValue()
             guard let id = manager.ids[key.id] else { return OSStatus(eventNotHandledErr) }
             if GetEventKind(event) == UInt32(kEventHotKeyReleased) {
-                manager.pressed.remove(key.id); output("hotkey_released",["binding":id.uuidString]); return noErr
+                manager.pressed.remove(key.id); manager.stopTimerIfIdle(); output("hotkey_released",["binding":id.uuidString]); return noErr
             }
             guard manager.pressed.insert(key.id).inserted else { return noErr }
+            manager.startReleaseTimer()
             output("hotkey_pressed",["binding":id.uuidString])
             manager.onPress?(id); return noErr
         },specs.count,&specs,Unmanaged.passUnretained(self).toOpaque(),&handler)
+    }
+    private func stopTimerIfIdle() {
+        if pressed.isEmpty { releaseTimer?.invalidate(); releaseTimer = nil }
+    }
+    private func startReleaseTimer() {
+        guard releaseTimer == nil else { return }
         // A focus change can lose Carbon's release notification. Reconcile with
         // actual key state so a missing release cannot disable a shortcut forever.
         let timer = Timer(timeInterval:0.05,repeats:true) { [weak self] _ in
@@ -39,19 +46,20 @@ final class GlobalShortcutManager {
                 guard let shortcut = self.shortcuts[number] else { return false }
                 return CGEventSource.keyState(.combinedSessionState,key:CGKeyCode(shortcut.keyCode))
             }
+            self.stopTimerIfIdle()
         }
         RunLoop.main.add(timer,forMode:.common); releaseTimer = timer
     }
     deinit { releaseTimer?.invalidate(); suspend(); if let handler { RemoveEventHandler(handler) } }
     func suspend() {
         for ref in refs.values { UnregisterEventHotKey(ref) }
-        refs.removeAll(); ids.removeAll(); pressed.removeAll(); shortcuts.removeAll()
+        refs.removeAll(); ids.removeAll(); pressed.removeAll(); shortcuts.removeAll(); stopTimerIfIdle()
     }
     func reload(_ bindings: [AppBinding]) {
         suspend(); errors.removeAll()
         for binding in bindings {
             guard let shortcut = binding.shortcut else { continue }
-            if let error = register(shortcut,for:binding.id) { errors[binding.id] = error }
+            if let error = register(shortcut,for:binding.id) { errors[binding.id] = error; output("hotkey_registration_failed",["binding":binding.id.uuidString,"reason":Localization.messageKey(error) ?? "register_failed","message":error]) }
         }
     }
     private func register(_ shortcut: Shortcut, for id: UUID) -> String? {

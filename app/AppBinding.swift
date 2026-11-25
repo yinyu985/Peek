@@ -97,7 +97,9 @@ struct AppBinding: Codable, Identifiable {
 }
 enum PeekError: LocalizedError {
     case message(String)
-    var errorDescription: String? { if case .message(let text) = self { return text }; return nil }
+    case failure(String,String)
+    var reason: String? { if case .failure(let code,_) = self { return code }; return nil }
+    var errorDescription: String? { switch self { case .message(let text),.failure(_,let text): return text } }
 }
 private enum LegacyAnimationSpeed: Int, Codable {
     case slow, medium, fast
@@ -138,9 +140,9 @@ struct HoverSettings: Codable, Equatable {
     private enum CodingKeys: String, CodingKey { case enabled, showDelay, hideDelay, showDuration, hideDuration, showSpeed, hideSpeed, revealWidth, topEnabled, topHideMode, allowSpaceSwitch, topCompressionEnabled, topMinimizeEnabled }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy:CodingKeys.self)
-        enabled = try values.decode(Bool.self,forKey:.enabled)
-        showDelay = try values.decode(Double.self,forKey:.showDelay)
-        hideDelay = try values.decode(Double.self,forKey:.hideDelay)
+        enabled = try values.decodeIfPresent(Bool.self,forKey:.enabled) ?? true
+        showDelay = max(0,min(5,try values.decodeIfPresent(Double.self,forKey:.showDelay) ?? 0))
+        hideDelay = max(0,min(10,try values.decodeIfPresent(Double.self,forKey:.hideDelay) ?? 0))
         func duration(_ key: CodingKeys,_ legacy: CodingKeys) throws -> Double {
             if let value = try values.decodeIfPresent(Double.self,forKey:key) { return Self.boundedDuration(value) }
             return try values.decodeIfPresent(LegacyAnimationSpeed.self,forKey:legacy)?.duration ?? 0.22
@@ -175,29 +177,38 @@ final class BindingStore {
     private let menuBarKey = "MenuBarIconVisible.v1"
     private(set) var menuBarIconVisible = true
     private(set) var pendingRemoval: (binding: AppBinding,index: Int,expires: Date)?
-    var loadError: String?
+    private var bindingError: String?
+    private var hoverError: String?
+    var loadError: String? { bindingError ?? hoverError }
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         menuBarIconVisible = defaults.object(forKey:menuBarKey) as? Bool ?? true
-        if let data = defaults.data(forKey:hoverKey) {
-            do { hoverSettings = try JSONDecoder().decode(HoverSettings.self,from:data) }
-            catch { loadError = L("收放配置无法读取，原始数据已保留。") }
+        if let raw = defaults.object(forKey:hoverKey) {
+            do {
+                guard let data = raw as? Data else { throw CocoaError(.propertyListReadCorrupt) }
+                hoverSettings = try JSONDecoder().decode(HoverSettings.self,from:data)
+            } catch { output("config_read_failed",["key":hoverKey,"reason":"invalid_settings"]); hoverError = L("收放配置无法读取，原始数据已保留。") }
         }
-        if let data = defaults.data(forKey:key) {
-            do { bindings = try JSONDecoder().decode([AppBinding].self,from:data) }
-            catch { loadError = L("应用配置无法读取，原始数据已保留。") }
+        if let raw = defaults.object(forKey:key) {
+            do {
+                guard let data = raw as? Data else { throw CocoaError(.propertyListReadCorrupt) }
+                let saved = try JSONDecoder().decode([AppBinding].self,from:data)
+                guard Set(saved.map(\.id)).count == saved.count, Set(saved.map(\.bundleID)).count == saved.count,
+                      saved.allSatisfy({ ($0.shortcut?.keyCode ?? 0) <= UInt32(UInt16.max) }) else { throw CocoaError(.propertyListReadCorrupt) }
+                bindings = saved
+            } catch { output("config_read_failed",["key":key,"reason":"invalid_bindings"]); bindingError = L("应用配置无法读取，原始数据已保留。") }
         }
     }
     private func save(_ next: [AppBinding]) throws {
-        guard loadError == nil else { throw PeekError.message(loadError!) }
+        if let bindingError { throw PeekError.message(bindingError) }
         let data = try JSONEncoder().encode(next)
-        defaults.set(data,forKey:key); bindings = next
+        defaults.set(data,forKey:key); bindings = next; output("bindings_saved",["count":next.count])
     }
     @discardableResult func add(_ url: URL) throws -> UUID {
         var item = try AppBinding(url:url)
         item.edge = .right
         if let existing = bindings.first(where:{$0.bundleID == item.bundleID}) { return existing.id }
-        try save(bindings + [item]); return item.id
+        try save(bindings + [item]); output("binding_added",["binding":item.id.uuidString,"bundle":item.bundleID]); return item.id
     }
     func setShortcut(_ shortcut: Shortcut?, for id: UUID, shortcutOnly: Bool? = nil) throws {
         if let shortcut,bindings.contains(where:{$0.id != id && $0.shortcut?.matches(shortcut) == true}) {
@@ -208,18 +219,18 @@ final class BindingStore {
         next[index].shortcut = shortcut
         if shortcut == nil { next[index].shortcutOnly = nil }
         else if let shortcutOnly { next[index].shortcutOnly = shortcutOnly ? true : nil }
-        try save(next)
+        try save(next); output("binding_trigger_changed",["binding":id.uuidString,"trigger":String(describing:next[index].trigger)])
     }
     func configure(_ id: UUID, edge: WindowEdge? = nil, windowTitle: String? = nil, changeWindow: Bool = false) throws {
         var next = bindings
         guard let index = next.firstIndex(where:{$0.id == id}) else { return }
         if let edge { next[index].edge = edge }
         if changeWindow { next[index].windowTitle = windowTitle }
-        try save(next)
+        try save(next); output("binding_configured",["binding":id.uuidString,"edge":next[index].selectedEdge.rawValue])
     }
     func configureHover(enabled: Bool? = nil, showDelay: Double? = nil, hideDelay: Double? = nil,
                         showDuration: Double? = nil, hideDuration: Double? = nil, revealWidth: Double? = nil, topEnabled: Bool? = nil, topHideMode: TopHideMode? = nil, allowSpaceSwitch: Bool? = nil) throws {
-        guard loadError == nil else { throw PeekError.message(loadError!) }
+        if let hoverError { throw PeekError.message(hoverError) }
         var next = hoverSettings
         if let enabled { next.enabled = enabled }
         if let topEnabled { next.topEnabled = topEnabled }
@@ -231,7 +242,7 @@ final class BindingStore {
         if let value = showDelay,value.isFinite { next.showDelay = max(0,min(5,value)) }
         if let value = hideDelay,value.isFinite { next.hideDelay = max(0,min(10,value)) }
         let data = try JSONEncoder().encode(next)
-        defaults.set(data,forKey:hoverKey); hoverSettings = next
+        defaults.set(data,forKey:hoverKey); hoverSettings = next; output("settings_saved",["settings":(try? JSONSerialization.jsonObject(with:data)) ?? [:]])
     }
     func setMenuBarIconVisible(_ visible: Bool) {
         defaults.set(visible,forKey:menuBarKey); menuBarIconVisible = visible
@@ -240,7 +251,7 @@ final class BindingStore {
         guard let index = bindings.firstIndex(where:{$0.id == id}) else { return }
         let binding = bindings[index]
         try save(bindings.filter{$0.id != id})
-        pendingRemoval = (binding,index,Date().addingTimeInterval(8))
+        pendingRemoval = (binding,index,Date().addingTimeInterval(8)); output("binding_removed",["binding":id.uuidString])
     }
     @discardableResult func undoRemoval() throws -> UUID? {
         guard let pending = pendingRemoval,pending.expires > Date() else { pendingRemoval = nil; return nil }
@@ -251,6 +262,6 @@ final class BindingStore {
             throw PeekError.message(L("原快捷键已被其他绑定使用，无法撤销删除。"))
         }
         var next = bindings; next.insert(pending.binding,at:min(pending.index,next.count))
-        try save(next); pendingRemoval = nil; return pending.binding.id
+        try save(next); pendingRemoval = nil; output("binding_removal_undone",["binding":pending.binding.id.uuidString]); return pending.binding.id
     }
 }

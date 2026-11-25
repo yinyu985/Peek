@@ -117,4 +117,6 @@ New configurations have top edge hiding off and desktop switching on. Updates pr
 
 General also contains launch at login and menu bar visibility. Press **⌘W**, click the close button, or hide Peek to close its settings window and remove its running Dock icon. Shortcuts and automatic behavior keep working; you do not need to quit. Choose Open Peek from the menu bar or reopen Peek.app in Finder to restore settings and the Dock icon. Peek does not change icons you have pinned to the Dock.
 
+**Troubleshooting:** Peek logs window requests, wait times, outcomes, and failure reasons locally in `~/Library/Logs/Peek/`. It keeps the latest seven UTC dates. When reporting an issue, share the entries around the time it occurred. Logs include application identifiers and window geometry, but not window titles or typed text. Review them before sharing.
+
 **Compatibility:** Desktop switching has been checked between ordinary desktops on a single display. Recall is not guaranteed for every application, full-screen Space, multiple displays, or Stage Manager. Exit full screen before using Peek. The bottom edge uses Visible strip, but some applications require a taller title bar to stay visible. In that case, the status explanation shows the actual exposed height.

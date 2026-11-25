@@ -55,6 +55,9 @@ enum Localization {
         lock.unlock()
         return result
     }
+    static func messageKey(_ value: String) -> String? {
+        lock.lock(); defer { lock.unlock() }; return rendered[value]?.key
+    }
     static func refresh(_ value: String) -> String { refresh(value,depth:0) }
     private static func refresh(_ value: String,depth: Int) -> String {
         guard depth < 8 else { return value }

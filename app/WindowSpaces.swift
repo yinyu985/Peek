@@ -20,8 +20,9 @@ enum WindowSpaces {
     static func activeSpaceIDs() -> Set<UInt64>? {
         guard let connection,let displays,
               let data = displays(connection())?.takeRetainedValue() as? [[String:Any]] else { return nil }
-        let result = Set(data.compactMap { ($0["Current Space"] as? [String:Any])?["ManagedSpaceID"] as? NSNumber }.map(\.uint64Value))
-        return result.isEmpty ? nil:result
+        let ids = data.compactMap { ($0["Current Space"] as? [String:Any])?["ManagedSpaceID"] as? NSNumber }.map(\.uint64Value)
+        guard !ids.isEmpty,ids.count == data.count,!ids.contains(0) else { return nil }
+        return Set(ids)
     }
     static func assignedSpaceIDs(_ number: CGWindowID) -> Set<UInt64>? {
         guard let connection,let spaces,

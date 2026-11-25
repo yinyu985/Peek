@@ -133,7 +133,12 @@
 "请同时按住 ⌘、⌥ 或 ⌃。" = "Hold ⌘, ⌥, or ⌃ with the key.";
 "打开 Peek" = "Open Peek";
 "退出 Peek" = "Quit Peek";
+"快捷键" = "Shortcut";
 "文件" = "File";
+"另一个 Peek 正在管理窗口。请退出多余的副本后重试。" = "Another copy of Peek is managing windows. Quit the extra copy and try again.";
+"恢复文件含重复绑定。原件已保留，窗口管理已暂停。" = "The recovery file contains duplicate bindings. The original is preserved and window management is paused.";
+"恢复文件被其他程序更改，未覆盖。请重新启动 Peek 后重试。" = "Another process changed the recovery file. It was not overwritten. Restart Peek and try again.";
+"窗口恢复文件无法读取。原件已保留，窗口管理已暂停。请检查文件后重新启动 Peek。" = "The window recovery file could not be read. The original is preserved and window management is paused. Check the file, then restart Peek.";
 "关闭窗口" = "Close Window";
 "Peek — 一个快捷键，唤回窗口。" = "Peek — One shortcut. Any window.";
 "窗口恢复记录无法保存，请检查磁盘空间后再退出。" = "Window recovery records could not be saved. Check disk space before quitting.";

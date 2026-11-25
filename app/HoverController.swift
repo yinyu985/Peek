@@ -229,12 +229,15 @@ final class HoverController {
     private func tick() {
         guard !suspended else { return }
         let pointer = mouseInAX()
-        if SystemInterface.isHotCorner(pointer) || SystemInterface.isPresented {
+        let corner = SystemInterface.isHotCorner(pointer)
+        let now = ProcessInfo.processInfo.systemUptime
+        if !corner { guard now-lastTick >= 1.0/60 else { return }; lastTick = now }
+        if corner || SystemInterface.isPresented {
             // Discard elapsed dwell/leave time. Closing Launchpad must not
             // immediately replay an old hide or reveal gesture.
             for (id,window) in windows {
                 var tracker = HoverTracker(); tracker.update(hidden:window.requiresRecall)
-                tracker.rearm = window.containsTrigger(mouseInAX())
+                tracker.rearm = window.containsTrigger(pointer)
                 trackers[id] = tracker
             }
             pendingReveals.removeAll(); edgeOwner = nil; edgeConsumed = false
@@ -250,8 +253,6 @@ final class HoverController {
             geometryAfter = ProcessInfo.processInfo.systemUptime
             onInteractionEnded?() // Read fresh AX frames before any leave decision.
         }
-        let now = ProcessInfo.processInfo.systemUptime
-        guard now-lastTick >= 1.0/60 else { return }; lastTick = now
         let frontPID = foregroundProvider()
         let candidates = bindingOrder.filter { id in
             !awaitingGeometry.contains(id) && windows[id].map { window in
